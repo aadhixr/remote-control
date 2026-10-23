@@ -27,13 +27,18 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android platform and build-tools
+      # The ubuntu-latest runner image ships ANDROID_HOME with cmdline-tools,
+      # android-35 and build-tools 35.0.0 already installed (see the
+      # actions/runner-images Ubuntu readme). Only install if missing.
+      - name: Ensure Android SDK packages
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+          if [ ! -d "$ANDROID_HOME/platforms/android-35" ] || [ ! -d "$ANDROID_HOME/build-tools/35.0.0" ]; then
+            SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+            yes | "$SM" --licenses > /dev/null || true
+            "$SM" "platforms;android-35" "build-tools;35.0.0"
+          fi
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
