@@ -184,10 +184,28 @@ export class SessionDO {
     if (roleOf(ws) === ROLE_TAG_DEVICE) {
       // Device -> browsers of this session, and to the shared console room
       // so the remote control page receives replies for any device.
-      for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {
-        safeSend(b, message);
+      let out = message;
+      // Full device info snapshots are stored in the registry so the console
+      // can show them (battery, RAM, storage, screen, network, …) even before
+      // anyone opens the control panel.
+      try {
+        const parsed = JSON.parse(message);
+        if (parsed && parsed.type === "device-info") {
+          parsed.deviceId = att.session;
+          out = JSON.stringify(parsed);
+          await this.notifyRegistry({
+            op: "info",
+            deviceId: att.session,
+            info: parsed.info || {},
+          });
+        }
+      } catch (e) {
+        /* not JSON — forward as-is */
       }
-      this.pushToConsoleRoom(message);
+      for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {
+        safeSend(b, out);
+      }
+      this.pushToConsoleRoom(out);
       return;
     }
 
@@ -312,8 +330,14 @@ export class RegistryDO {
           model: msg.model || msg.deviceId,
           online: true,
           unlocked: devices[msg.deviceId]?.unlocked || false,
+          info: devices[msg.deviceId]?.info || null,
           lastSeen: Date.now(),
         };
+      } else if (msg.op === "info") {
+        if (devices[msg.deviceId]) {
+          devices[msg.deviceId].info = msg.info || {};
+          devices[msg.deviceId].lastSeen = Date.now();
+        }
       } else if (msg.op === "detach") {
         if (devices[msg.deviceId]) {
           devices[msg.deviceId].online = false;
@@ -333,6 +357,7 @@ export class RegistryDO {
           model: d.model,
           online: !!d.online,
           unlocked: !!d.unlocked,
+          info: d.info || null,
         })),
       });
     }

@@ -1,6 +1,8 @@
 package com.example.remotecontrol
 
 import android.Manifest
+import android.app.ActivityManager
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,6 +10,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -27,10 +30,12 @@ import android.net.Network
 import android.os.Build
 import android.os.Bundle
 import android.os.CancellationSignal
+import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.StatFs
 import android.util.Base64
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -50,8 +55,11 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.util.*
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -75,11 +83,10 @@ class RemoteControlService : Service() {
         const val KEY_SERVER_URL = "server_url"
         const val KEY_ENABLED = "enabled"
         const val KEY_SESSION_ID = "session_id"
-        // WebSocket embedded directly - no relay needed
-        // Connect browser to: ws://<server-ip>:8765/ws?sessionId=DEVICE_NAME
-        // Or: wss://<domain>:8765/ws?sessionId=DEVICE_NAME
-        // The server runs locally or on same network; Session ID = Build.MODEL
-        const val DEFAULT_URL = "ws://10.0.2.2:8765/ws"
+        // Live relay (Cloudflare Worker). The app connects here on startup;
+        // the web console at the same origin lists every connected device.
+        // Session ID = Build.MODEL (device name). Override in the app UI.
+        const val DEFAULT_URL = "wss://remote-control-relay.adhiphub-rc.workers.dev/ws"
         const val ACTION_ATTACH_PROJECTION = "com.example.remotecontrol.ATTACH_PROJECTION"
 
         // MediaProjection consent result handed from MainActivity to the
@@ -250,6 +257,7 @@ class RemoteControlService : Service() {
             RemoteControlState.status.value = "Connected"
             updateNotification("Connected · session $sessionId")
             socket.send(helloJson())
+            sendDeviceInfo()
         }
 
         override fun onMessage(socket: WebSocket, text: String) {
@@ -314,6 +322,7 @@ class RemoteControlService : Service() {
                 put("type", "pong")
                 id?.let { put("id", it) }
             }
+            "info" -> sendDeviceInfo(id)
             else -> sendError(action.ifEmpty { null }, "unsupported action", id)
         }
     }
@@ -600,6 +609,98 @@ class RemoteControlService : Service() {
     }
 
     // ----------------------------------------------------------- plumbing
+
+    private fun sendDeviceInfo(id: Any? = null) = sendJson {
+        put("type", "device-info")
+        id?.let { put("id", it) }
+        put("info", deviceInfoJson())
+    }
+
+    /** Full device snapshot shown in the web console. All fields best-effort. */
+    private fun deviceInfoJson(): JSONObject {
+        val info = JSONObject()
+        runCatching {
+            info.put("brand", Build.BRAND)
+            info.put("manufacturer", Build.MANUFACTURER)
+            info.put("model", Build.MODEL)
+            info.put("deviceName", Build.DEVICE)
+            info.put("product", Build.PRODUCT)
+            info.put("hardware", Build.HARDWARE)
+            info.put("board", Build.BOARD)
+        }
+        runCatching {
+            info.put("androidVersion", Build.VERSION.RELEASE)
+            info.put("sdk", Build.VERSION.SDK_INT)
+            info.put("securityPatch", Build.VERSION.SECURITY_PATCH)
+            info.put("buildId", Build.DISPLAY)
+        }
+        runCatching {
+            val dm = resources.displayMetrics
+            info.put("screenResolution", "${dm.widthPixels}x${dm.heightPixels}")
+            info.put("densityDpi", dm.densityDpi)
+        }
+        runCatching { info.put("refreshRateHz", windowManager.defaultDisplay.refreshRate.toInt()) }
+        runCatching {
+            val mem = ActivityManager.MemoryInfo()
+            getSystemService(ActivityManager::class.java).getMemoryInfo(mem)
+            info.put("totalRamMb", mem.totalMem / (1024L * 1024L))
+            info.put("cpuCores", Runtime.getRuntime().availableProcessors())
+            info.put("abis", JSONArray(Build.SUPPORTED_ABIS))
+        }
+        runCatching {
+            val stat = StatFs(Environment.getDataDirectory().path)
+            val total = stat.blockCountLong * stat.blockSizeLong
+            val free = stat.availableBlocksLong * stat.blockSizeLong
+            val gb = 1024.0 * 1024 * 1024
+            info.put("storageTotalGb", (total / gb * 10).toLong() / 10.0)
+            info.put("storageFreeGb", (free / gb * 10).toLong() / 10.0)
+            if (total > 0) info.put("storageUsedPercent", ((total - free) * 100 / total).toInt())
+        }
+        runCatching {
+            val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+            val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            val plugged = intent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+            val tempTenths = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
+            val voltage = intent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0) ?: 0
+            if (level >= 0 && scale > 0) info.put("batteryPercent", level * 100 / scale)
+            info.put(
+                "batteryStatus",
+                when (status) {
+                    BatteryManager.BATTERY_STATUS_CHARGING -> "charging"
+                    BatteryManager.BATTERY_STATUS_FULL -> "full"
+                    BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "not charging"
+                    else -> "discharging"
+                }
+            )
+            info.put(
+                "chargingVia",
+                when (plugged) {
+                    BatteryManager.BATTERY_PLUGGED_AC -> "ac"
+                    BatteryManager.BATTERY_PLUGGED_USB -> "usb"
+                    BatteryManager.BATTERY_PLUGGED_WIRELESS -> "wireless"
+                    else -> "none"
+                }
+            )
+            info.put("batteryTempC", tempTenths / 10.0)
+            info.put("batteryVoltageMv", voltage)
+        }
+        runCatching {
+            val addresses = NetworkInterface.getNetworkInterfaces()
+                ?.toList()
+                ?.flatMap { iface -> iface.inetAddresses?.toList().orEmpty() }
+                ?.filter { it is Inet4Address && !it.isLoopbackAddress }
+                ?.mapNotNull { it.hostAddress }
+                .orEmpty()
+            info.put("ipAddresses", JSONArray(addresses))
+        }
+        runCatching { info.put("locale", Locale.getDefault().toLanguageTag()) }
+        runCatching { info.put("timezone", java.util.TimeZone.getDefault().id) }
+        runCatching { info.put("screenSecure", getSystemService(KeyguardManager::class.java).isDeviceSecure) }
+        runCatching { info.put("appVersion", packageManager.getPackageInfo(packageName, 0).versionName) }
+        return info
+    }
 
     private fun helloJson(): String = JSONObject()
         .put("type", "hello")

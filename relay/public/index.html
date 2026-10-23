@@ -51,6 +51,13 @@
   #unlock-msg.err { color: #fca5a5; }
   img#shot { max-width: 100%; border: 1px solid #2a2f3a; border-radius: 6px; display: none; }
   a { color: #93c5fd; }
+  .info-section { margin-top: 10px; border-top: 1px solid #2a2f3a; padding-top: 8px; }
+  .info-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 2px 14px; font-size: 12px; margin-top: 6px;
+  }
+  .info-grid .k { color: #9aa4b2; }
+  .info-grid .v { color: #e6e6e6; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -87,6 +94,7 @@
     <button onclick="send('screenshot')">screenshot</button>
     <button onclick="send('location')">location</button>
     <button onclick="send('ping')">ping</button>
+    <button onclick="send('info')">device info</button>
   </div>
   <div class="row">
     <input id="click-x" type="number" placeholder="x" style="max-width:90px" />
@@ -102,6 +110,15 @@
   <img id="shot" alt="last screenshot" />
   <a id="dl" download="screenshot.jpg" style="display:none">download last screenshot</a>
   <div id="loc" class="hint"></div>
+  <div class="info-section" id="info-section" style="display:none">
+    <div class="row">
+      <label>Device Info</label>
+      <span class="hint" id="info-updated"></span>
+      <span class="spacer"></span>
+      <button class="secondary" onclick="send('info')">refresh</button>
+    </div>
+    <div class="info-grid" id="info-grid"></div>
+  </div>
 </div>
 
 <div class="card">
@@ -115,6 +132,44 @@ const $ = (id) => document.getElementById(id);
 let ws = null;
 let selectedDevice = null;
 let reconnectDelay = 1000;
+const deviceInfoCache = {};
+
+const INFO_LABELS = {
+  brand: "Brand", manufacturer: "Manufacturer", model: "Model", deviceName: "Device",
+  product: "Product", hardware: "Hardware", board: "Board",
+  androidVersion: "Android", sdk: "SDK level", securityPatch: "Security patch", buildId: "Build ID",
+  screenResolution: "Screen", densityDpi: "Density (dpi)", refreshRateHz: "Refresh rate (Hz)",
+  totalRamMb: "RAM (MB)", cpuCores: "CPU cores", abis: "ABIs",
+  storageTotalGb: "Storage total (GB)", storageFreeGb: "Storage free (GB)", storageUsedPercent: "Storage used (%)",
+  batteryPercent: "Battery (%)", batteryStatus: "Battery status", chargingVia: "Charging via",
+  batteryTempC: "Battery temp (°C)", batteryVoltageMv: "Battery (mV)",
+  ipAddresses: "IP addresses", locale: "Locale", timezone: "Timezone",
+  screenSecure: "Screen secure", appVersion: "App version"
+};
+
+function renderDeviceInfo(info) {
+  const grid = $("info-grid");
+  grid.innerHTML = "";
+  const keys = Object.keys(INFO_LABELS).filter(
+    (k) => info[k] !== undefined && info[k] !== null && info[k] !== ""
+  );
+  if (keys.length === 0) {
+    $("info-section").style.display = "none";
+    return;
+  }
+  for (const k of keys) {
+    const kEl = document.createElement("span");
+    kEl.className = "k";
+    kEl.textContent = INFO_LABELS[k];
+    const vEl = document.createElement("span");
+    vEl.className = "v";
+    vEl.textContent = Array.isArray(info[k]) ? info[k].join(", ") : String(info[k]);
+    grid.appendChild(kEl);
+    grid.appendChild(vEl);
+  }
+  $("info-updated").textContent = "received " + new Date().toLocaleTimeString();
+  $("info-section").style.display = "block";
+}
 
 function log(line, cls) {
   const div = document.createElement("div");
@@ -142,6 +197,7 @@ async function loadDeviceList() {
       return;
     }
     for (const d of devices) {
+      if (d.info) deviceInfoCache[d.deviceId] = d.info;
       const row = document.createElement("div");
       row.className = "device-item";
       row.innerHTML =
@@ -152,6 +208,14 @@ async function loadDeviceList() {
         (d.unlocked
           ? '<span class="badge unlocked">unlocked</span>'
           : '<span class="badge locked">locked</span>') +
+        (d.info && d.info.batteryPercent !== undefined
+          ? '<span class="badge unlocked">' + d.info.batteryPercent + "%" +
+            (String(d.info.batteryStatus || "").indexOf("charg") >= 0 && d.info.chargingVia !== "none" ? "⚡" : "") +
+            "</span>"
+          : "") +
+        (d.info && d.info.androidVersion !== undefined
+          ? '<span class="badge locked">Android ' + escapeHtml(String(d.info.androidVersion)) + "</span>"
+          : "") +
         '<span class="hint">' + escapeHtml(d.model || "") + "</span>" +
         '<span class="spacer"></span>';
       const controlBtn = document.createElement("button");
@@ -187,6 +251,12 @@ async function unlockAndSelect(deviceId) {
       $("unlock-msg").className = "ok";
       log("unlocked " + deviceId, "ok");
       loadDeviceList();
+      if (deviceInfoCache[deviceId]) {
+        renderDeviceInfo(deviceInfoCache[deviceId]);
+      } else {
+        $("info-section").style.display = "none";
+      }
+      send("info"); // ask the phone for a fresh full snapshot
     } else {
       $("unlock-msg").textContent = data.error || "unlock failed";
       $("unlock-msg").className = "err";
@@ -249,6 +319,15 @@ function handlePayload(raw) {
     msg = JSON.parse(raw);
   } catch (e) {
     log("← " + String(raw).slice(0, 200));
+    return;
+  }
+
+  if (msg.type === "device-info") {
+    const info = msg.info || {};
+    const dev = msg.deviceId || selectedDevice;
+    if (dev) deviceInfoCache[dev] = info;
+    if (!msg.deviceId || msg.deviceId === selectedDevice) renderDeviceInfo(info);
+    log("← device info" + (dev ? " for " + dev : "") + " (" + Object.keys(info).length + " fields)", "in");
     return;
   }
 

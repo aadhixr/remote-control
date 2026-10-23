@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.remotecontrol"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     // Release signing — ONLY this keystore can update the installed app.
@@ -23,6 +23,15 @@ android {
     // While the keystore is absent, release builds fall back to the debug key
     // so CI and local builds stay green.
     signingConfigs {
+        // Committed debug keystore: every build (local + CI) signs with the
+        // SAME key, so updates always install over the previous APK.
+        create("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+
         create("release") {
             val keystore = file("my-release-keystore.keystore")
             if (keystore.exists()) {

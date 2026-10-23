@@ -64,6 +64,29 @@ device.send(JSON.stringify({ type: "pong", action: "pong", id: "t2" }));
 const reply = await gotReply;
 check("device reply reaches browser", reply.id === "t2");
 
+// 6b. Full device info flows to console and registry.
+const gotInfo = once(browser, (m) => m.type === "device-info");
+device.send(
+  JSON.stringify({
+    type: "device-info",
+    info: { model: DEVICE, batteryPercent: 88, androidVersion: 15, totalRamMb: 8192 },
+  })
+);
+const infoMsg = await gotInfo;
+check(
+  "device-info reaches console with deviceId",
+  infoMsg.deviceId === DEVICE && infoMsg.info.batteryPercent === 88,
+  JSON.stringify(infoMsg).slice(0, 120)
+);
+await wait(1500);
+list = await (await fetch(BASE + "/console?mode=list")).json();
+entry = list.devices.find((d) => d.deviceId === DEVICE);
+check(
+  "registry stored full device info",
+  entry && entry.info && entry.info.batteryPercent === 88 && entry.info.androidVersion === 15,
+  JSON.stringify(entry && entry.info)
+);
+
 // 7. Wrong password rejected.
 let bad = await fetch(BASE + "/console/unlock?deviceId=" + encodeURIComponent(DEVICE) + "&pw=99999");
 check("wrong password rejected", bad.status === 403, "status " + bad.status);
