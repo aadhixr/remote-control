@@ -1,0 +1,21 @@
+# Deployed with `npx wrangler deploy` (auth via CLOUDFLARE_API_TOKEN env var).
+name = "remote-control-relay"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# Control page is served from this same origin; unmatched paths fall through
+# to the Worker, which handles /ws.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# One Durable Object instance per session id — it holds the live sockets and
+# forwards frames between the phone and every connected browser.
+[[durable_objects.bindings]]
+name = "SESSIONS"
+class_name = "SessionDO"
+
+[[migrations]]
+tag = "v1"
+# SQLite-backed class: required for Durable Objects on the free plan.
+new_sqlite_classes = ["SessionDO"]
