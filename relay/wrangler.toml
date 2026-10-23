@@ -17,6 +17,11 @@ binding = "ASSETS"
 name = "SESSIONS"
 class_name = "SessionDO"
 
+# Global device registry — lists every connected device and holds unlock state.
+[[durable_objects.bindings]]
+name = "REGISTRY"
+class_name = "RegistryDO"
+
 [[migrations]]
 tag = "v1"
 # SQLite-backed class: required for Durable Objects on the free plan.

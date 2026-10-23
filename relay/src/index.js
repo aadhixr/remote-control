@@ -24,6 +24,9 @@ const ROLE_TAG_DEVICE = "device";
 const ROLE_TAG_BROWSER = "browser";
 const UNLOCK_PASSWORD = "00100";
 const REGISTRY_NAME = "__device_registry__";
+// All console browsers share one well-known session so device replies can be
+// delivered to them regardless of which session the phone belongs to.
+const CONSOLE_ROOM = "__console__";
 
 function safeSend(ws, data) {
   try {
@@ -66,10 +69,10 @@ export class SessionDO {
   }
 
   async notifyRegistry(message) {
-    if (!this.env || !this.env.SESSIONS) return;
+    if (!this.env || !this.env.REGISTRY) return;
     try {
-      const id = this.env.SESSIONS.idFromName(REGISTRY_NAME);
-      await this.env.SESSIONS.get(id).fetch("https://relay/registry", {
+      const id = this.env.REGISTRY.idFromName(REGISTRY_NAME);
+      await this.env.REGISTRY.get(id).fetch("https://relay/registry", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(message),
@@ -81,6 +84,15 @@ export class SessionDO {
 
   async fetch(request) {
     const url = new URL(request.url);
+
+    // Internal endpoint: the console room receives device replies here.
+    if (url.pathname === "/__push") {
+      const message = await request.text();
+      for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {
+        safeSend(b, message);
+      }
+      return json({ ok: true });
+    }
 
     // Internal endpoint: console DO forwards a command for this session's device.
     if (url.pathname === "/__forward") {
@@ -139,12 +151,16 @@ export class SessionDO {
     if (role === ROLE_TAG_DEVICE) {
       // Register in the global device registry so the console can list it.
       await this.notifyRegistry({ op: "attach", deviceId: session, model });
+      const attached = JSON.stringify({
+        type: "relay",
+        event: "device-attached",
+        deviceId: session,
+        model,
+      });
       for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {
-        safeSend(
-          b,
-          JSON.stringify({ type: "relay", event: "device-attached", deviceId: session, model })
-        );
+        safeSend(b, attached);
       }
+      this.pushToConsoleRoom(attached);
       safeSend(
         server,
         JSON.stringify({ type: "relay", event: "device-attached", self: true })
@@ -166,10 +182,12 @@ export class SessionDO {
     const att = attachmentOf(ws);
 
     if (roleOf(ws) === ROLE_TAG_DEVICE) {
-      // Device -> browsers of this session.
+      // Device -> browsers of this session, and to the shared console room
+      // so the remote control page receives replies for any device.
       for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {
         safeSend(b, message);
       }
+      this.pushToConsoleRoom(message);
       return;
     }
 
@@ -218,6 +236,19 @@ export class SessionDO {
     }
   }
 
+  async pushToConsoleRoom(message) {
+    if (!this.env || !this.env.SESSIONS) return;
+    try {
+      const id = this.env.SESSIONS.idFromName(CONSOLE_ROOM);
+      await this.env.SESSIONS.get(id).fetch("https://relay/__push", {
+        method: "POST",
+        body: message,
+      });
+    } catch (e) {
+      /* nobody in the console room — fine */
+    }
+  }
+
   async webSocketClose(ws) {
     await this.onLeave(ws);
   }
@@ -239,6 +270,7 @@ export class SessionDO {
       for (const peer of this.state.getWebSockets(ROLE_TAG_BROWSER)) {
         safeSend(peer, payload);
       }
+      this.pushToConsoleRoom(payload);
     } else {
       for (const peer of this.state.getWebSockets()) {
         if (peer !== ws) {
@@ -360,12 +392,12 @@ export default {
           : url.pathname === "/console/forget"
             ? "/forget"
             : "/list";
-      const id = env.SESSIONS.idFromName(REGISTRY_NAME);
+      const id = env.REGISTRY.idFromName(REGISTRY_NAME);
       const rewritten = new Request("https://relay" + target + url.search, {
         method: request.method,
         headers: request.headers,
       });
-      return env.SESSIONS.get(id).fetch(rewritten);
+      return env.REGISTRY.get(id).fetch(rewritten);
     }
 
     if (url.pathname === "/ws") {
@@ -379,10 +411,11 @@ export default {
         }
       }
 
+      // Empty/missing sessionId = a console browser -> shared console room.
       const sessionId =
         url.searchParams.get("sessionId") ||
         request.headers.get("X-Session-Id") ||
-        "default";
+        CONSOLE_ROOM;
 
       // One Durable Object instance per session id.
       const id = env.SESSIONS.idFromName(sessionId);
