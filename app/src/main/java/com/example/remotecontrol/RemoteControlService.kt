@@ -53,7 +53,9 @@ import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.*
+import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import java.util.function.Consumer
 import kotlin.coroutines.resume
 import kotlin.math.max
 import kotlin.math.min
@@ -79,6 +81,12 @@ class RemoteControlService : Service() {
         // The server runs locally or on same network; Session ID = Build.MODEL
         const val DEFAULT_URL = "ws://10.0.2.2:8765/ws"
         const val ACTION_ATTACH_PROJECTION = "com.example.remotecontrol.ATTACH_PROJECTION"
+
+        // MediaProjection consent result handed from MainActivity to the
+        // service: set by the activity's projection launcher, consumed once
+        // by onStartCommand/ensureProjection.
+        @Volatile
+        var pendingProjection: Pair<Int, Intent>? = null
 
         private const val NOTIF_ID = 42
         private const val CHANNEL_ID = "remote_control"
