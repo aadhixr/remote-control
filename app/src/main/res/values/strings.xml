@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Remote Control</string>
+
+    <string name="accessibility_service_label">Remote Control taps</string>
+    <string name="accessibility_service_description">Lets the Remote Control session perform tap gestures on this device. Only enable this on a device you own or administer, for a session you started yourself.</string>
+
+    <string name="notification_channel_name">Remote session</string>
+    <string name="notification_title">Remote control active</string>
+</resources>
