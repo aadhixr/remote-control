@@ -178,7 +178,6 @@ fun RemoteControlScreen() {
         notice = "Session stopped"
     }
 
-    // Refresh permission flags whenever the user comes back from Settings.
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -192,7 +191,6 @@ fun RemoteControlScreen() {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Ask for the core runtime permissions on first launch.
     LaunchedEffect(Unit) { requestCorePermissions() }
 
     Scaffold(
@@ -244,7 +242,7 @@ fun RemoteControlScreen() {
             OutlinedTextField(
                 value = serverUrl,
                 onValueChange = { serverUrl = it },
-                label = { Text("WebSocket server (ws://host/ws)") },
+                label = { Text("WebSocket server (ws://host:8765/ws)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -276,8 +274,7 @@ fun RemoteControlScreen() {
             OutlinedButton(
                 onClick = {
                     context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                    notice =
-                        "Enable \"Remote Control taps\" so the \"click\" command can work"
+                    notice = "Enable \"Remote Control taps\" so the \"click\" command can work"
                 },
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -313,9 +310,7 @@ fun RemoteControlScreen() {
 
             Text(
                 text = "Accepted commands: " +
-                    "{\"action\":\"click\",\"x\":…,\"y\":…} (x/y optional), " +
-                    "{\"action\":\"screenshot\"}, {\"action\":\"location\"}, " +
-                    "{\"action\":\"kill\"}, {\"action\":\"ping\"}",
+                    """{"action":"click","x":…,"y":…} (x/y optional), {"action":"screenshot"}, {"action":"location"}, {"action":"kill"}, {"action":"ping"}""",
                 style = MaterialTheme.typography.bodySmall
             )
 
@@ -325,18 +320,12 @@ fun RemoteControlScreen() {
 }
 
 private fun checkLocation(context: Context): Boolean =
-    ContextCompat.checkSelfPermission(
-        context, Manifest.permission.ACCESS_FINE_LOCATION
-    ) == PackageManager.PERMISSION_GRANTED ||
-        ContextCompat.checkSelfPermission(
-            context, Manifest.permission.ACCESS_COARSE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
+    ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
 private fun checkNotifications(context: Context): Boolean =
     Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-        ContextCompat.checkSelfPermission(
-            context, Manifest.permission.POST_NOTIFICATIONS
-        ) == PackageManager.PERMISSION_GRANTED
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
 private fun isAccessibilityEnabled(context: Context): Boolean {
     val enabled = Settings.Secure.getString(
@@ -347,4 +336,4 @@ private fun isAccessibilityEnabled(context: Context): Boolean {
         component.startsWith(context.packageName) &&
             component.contains("TapAccessibilityService")
     }
-}
+}

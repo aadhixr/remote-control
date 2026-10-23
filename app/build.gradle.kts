@@ -14,6 +14,23 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        signingConfig = signingConfigs.debug
+        // Only update with this exact keystore!
+        applicationId = "com.example.remotecontrol"
+    }
+
+    signingConfigs.release {
+        storeFile = file('my-release-keystore.keystore')
+        storePassword = 'your-store-password'
+        keyAlias = 'my-key-alias'
+        keyPassword = 'your-key-password'
+    }
+
+    signingConfigs.debug {
+        storeFile = file('debug.keystore')
+        storePassword = 'android'
+        keyAlias = 'androiddebugkey'
+        keyPassword = 'android'
     }
 
     buildTypes {
@@ -23,8 +40,16 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // App signing - ONLY this key can update the APK
+            signingConfig = signingConfigs.release
         }
-    }
+
+        signingConfigs.release {
+            storeFile = file('my-release-keystore.keystore')
+            storePassword = 'your-store-password'
+            keyAlias = 'my-key-alias'
+            keyPassword = 'your-key-password'
+        }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

@@ -30,6 +30,7 @@ import android.os.CancellationSignal
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Base64
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -51,19 +52,13 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import java.util.UUID
-import java.util.concurrent.Executor
+import java.util.*
 import java.util.concurrent.TimeUnit
-import java.util.function.Consumer
 import kotlin.coroutines.resume
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.random.Random
 
-/**
- * UI-visible state published by the running service so [MainActivity] can render
- * connection status and the session id without binding to the service.
- */
 object RemoteControlState {
     val isConnected = kotlinx.coroutines.flow.MutableStateFlow(false)
     val sessionId = kotlinx.coroutines.flow.MutableStateFlow("")
@@ -71,20 +66,6 @@ object RemoteControlState {
     val lastMessage = kotlinx.coroutines.flow.MutableStateFlow("")
 }
 
-/**
- * Foreground service that keeps one OkHttp WebSocket alive and executes the
- * remote command protocol:
- *
- *   {"action":"click","x":<opt>,"y":<opt>}   -> tap (random coords when x/y absent)
- *   {"action":"screenshot"}                  -> JPEG (base64) sent back over the socket
- *   {"action":"location"}                    -> last known / fresh GPS fix
- *   {"action":"kill"}                        -> graceful shutdown + process exit
- *   {"action":"ping"}                        -> {"type":"pong"}
- *
- * Reconnection: exponential backoff (1s -> 30s, + jitter), reset on every
- * successful open, plus an immediate fast retry when the default network comes
- * back. A generation counter makes stale socket callbacks harmless.
- */
 class RemoteControlService : Service() {
 
     companion object {
@@ -92,15 +73,12 @@ class RemoteControlService : Service() {
         const val KEY_SERVER_URL = "server_url"
         const val KEY_ENABLED = "enabled"
         const val KEY_SESSION_ID = "session_id"
-        const val DEFAULT_URL =
-            "wss://remote-control-relay.adhiphub-rc.workers.dev/ws"
-        const val ACTION_ATTACH_PROJECTION =
-            "com.example.remotecontrol.ATTACH_PROJECTION"
-
-        /** Consent result handed over by MainActivity (resultCode to data). */
-        @Volatile
-        @JvmStatic
-        var pendingProjection: Pair<Int, Intent>? = null
+        // WebSocket embedded directly - no relay needed
+        // Connect browser to: ws://<server-ip>:8765/ws?sessionId=DEVICE_NAME
+        // Or: wss://<domain>:8765/ws?sessionId=DEVICE_NAME
+        // The server runs locally or on same network; Session ID = Build.MODEL
+        const val DEFAULT_URL = "ws://10.0.2.2:8765/ws"
+        const val ACTION_ATTACH_PROJECTION = "com.example.remotecontrol.ATTACH_PROJECTION"
 
         private const val NOTIF_ID = 42
         private const val CHANNEL_ID = "remote_control"
@@ -134,7 +112,6 @@ class RemoteControlService : Service() {
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             if (shuttingDown || RemoteControlState.isConnected.value) return
-            // Back off is pointless once the network itself just returned.
             reconnectJob?.cancel()
             reconnectAttempt = 0
             scope.launch {
@@ -143,8 +120,6 @@ class RemoteControlService : Service() {
             }
         }
     }
-
-    // ---------------------------------------------------------------- lifecycle
 
     override fun onCreate() {
         super.onCreate()
@@ -155,14 +130,11 @@ class RemoteControlService : Service() {
                 Build.MODEL.contains('/') -> Build.MODEL.split('/').first()
                 else -> Build.MODEL
             }
-       .also {
-            prefs.edit().putString(KEY_SESSION_ID, it).apply()
-        }
+            .also { prefs.edit().putString(KEY_SESSION_ID, it).apply() }
         RemoteControlState.sessionId.value = sessionId
 
         createNotificationChannel()
         if (!startAsForeground("Starting…")) {
-            // Cannot hold a typed foreground service (permissions revoked).
             stopSelf()
             return
         }
@@ -174,7 +146,7 @@ class RemoteControlService : Service() {
 
         client = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.SECONDS) // WebSockets are kept alive by pings
+            .readTimeout(0, TimeUnit.SECONDS)
             .writeTimeout(10, TimeUnit.SECONDS)
             .pingInterval(20, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
@@ -200,8 +172,6 @@ class RemoteControlService : Service() {
             }
             else -> updateNotification(notifText)
         }
-        // Sticky: Android restarts the service (and therefore the socket) if the
-        // process is killed while a session is enabled.
         return START_STICKY
     }
 
@@ -239,12 +209,9 @@ class RemoteControlService : Service() {
         isConnecting = true
         try {
             val url = normalizeWsUrl(prefs.getString(KEY_SERVER_URL, DEFAULT_URL) ?: DEFAULT_URL)
-            val request = Request.Builder()
-                .url(url)
-                .header("X-Session-Id", sessionId)
-                .build()
+            val request = Request.Builder().url(url).build()
             val generation = ++webSocketGeneration
-            runCatching { webSocket?.cancel() } // drop any stale socket
+            runCatching { webSocket?.cancel() }
             webSocket = client.newWebSocket(request, socketListener(generation))
             RemoteControlState.status.value = "Connecting…"
             updateNotification("Connecting…")
@@ -255,7 +222,6 @@ class RemoteControlService : Service() {
         }
     }
 
-    /** OkHttp's HttpUrl only accepts http/https; ws/wss are mapped 1:1. */
     private fun normalizeWsUrl(raw: String): String = when {
         raw.startsWith("ws://") -> "http://" + raw.removePrefix("ws://")
         raw.startsWith("wss://") -> "https://" + raw.removePrefix("wss://")
@@ -311,8 +277,8 @@ class RemoteControlService : Service() {
         reconnectJob?.cancel()
         val attempt = reconnectAttempt
         reconnectAttempt = attempt + 1
-        val base = min(MAX_BACKOFF_MS, 1000L shl attempt.coerceAtMost(5)) // 1s,2s,4s…capped 30s
-        val waitMs = base + Random.nextLong(0, base / 2 + 1)             // +/- 50% jitter
+        val base = min(MAX_BACKOFF_MS, 1000L shl attempt.coerceAtMost(5))
+        val waitMs = base + Random.nextLong(0, base / 2 + 1)
         RemoteControlState.status.value = "Reconnecting in ${waitMs / 1000}s…"
         updateNotification("Reconnecting in ${waitMs / 1000}s…")
         reconnectJob = scope.launch {
@@ -321,13 +287,11 @@ class RemoteControlService : Service() {
         }
     }
 
-    // ------------------------------------------------------------------ commands
+    // --------------------------------------------------------------- commands
 
     private fun handleCommand(raw: String) {
         RemoteControlState.lastMessage.value = raw.take(160)
-        val json = try {
-            JSONObject(raw)
-        } catch (e: Exception) {
+        val json = try { JSONObject(raw) } catch (e: Exception) {
             sendError(null, "invalid JSON")
             return
         }
@@ -359,11 +323,7 @@ class RemoteControlService : Service() {
 
         val service = TapAccessibilityService.instance
         if (service == null) {
-            sendError(
-                "click",
-                "tap service disabled – enable \"Remote Control taps\" in Settings > Accessibility",
-                id
-            )
+            sendError("click", "tap service disabled – enable \"Remote Control taps\" in Settings > Accessibility", id)
             return
         }
         service.tap(x, y) { ok ->
@@ -387,11 +347,7 @@ class RemoteControlService : Service() {
             try {
                 val proj = ensureProjection()
                 if (proj == null) {
-                    sendError(
-                        "screenshot",
-                        "screen capture not granted – tap \"Grant screen capture\" in the app",
-                        id
-                    )
+                    sendError("screenshot", "screen capture not granted – tap \"Grant screen capture\" in the app", id)
                     return@launch
                 }
                 val bitmap = captureScreen(proj)
@@ -429,9 +385,7 @@ class RemoteControlService : Service() {
                     Manifest.permission.ACCESS_FINE_LOCATION,
                     Manifest.permission.ACCESS_COARSE_LOCATION
                 ).any {
-                    ContextCompat.checkSelfPermission(
-                        this@RemoteControlService, it
-                    ) == PackageManager.PERMISSION_GRANTED
+                    ContextCompat.checkSelfPermission(this@RemoteControlService, it) == PackageManager.PERMISSION_GRANTED
                 }
                 if (!granted) {
                     sendError("location", "location permission not granted", id)
@@ -477,24 +431,14 @@ class RemoteControlService : Service() {
             LocationManager.GPS_PROVIDER,
             LocationManager.NETWORK_PROVIDER,
             LocationManager.PASSIVE_PROVIDER
-        ).filter { provider ->
-            runCatching { lm.isProviderEnabled(provider) }.getOrDefault(false)
-        }
-        return candidates.mapNotNull { provider ->
-            runCatching { lm.getLastKnownLocation(provider) }.getOrNull()
-        }.maxByOrNull { it.time }
+        ).filter { provider -> runCatching { lm.isProviderEnabled(provider) }.getOrDefault(false) }
+        return candidates.mapNotNull { provider -> runCatching { lm.getLastKnownLocation(provider) }.getOrNull() }.maxByOrNull { it.time }
     }
 
-    /** Falls back to a single fresh fix with a 10s cap when last-known is missing. */
     private suspend fun requestFreshLocation(lm: LocationManager): Location? {
         val provider = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
-            .firstOrNull { p ->
-                lm.allProviders.contains(p) &&
-                    runCatching { lm.isProviderEnabled(p) }.getOrDefault(false)
-            }
-            ?: lm.allProviders.firstOrNull {
-                runCatching { lm.isProviderEnabled(it) }.getOrDefault(false)
-            }
+            .firstOrNull { p -> lm.allProviders.contains(p) && runCatching { lm.isProviderEnabled(p) }.getOrDefault(false) }
+            ?: lm.allProviders.firstOrNull { runCatching { lm.isProviderEnabled(it) }.getOrDefault(false) }
             ?: return null
 
         return withTimeoutOrNull(10_000L) {
@@ -503,50 +447,29 @@ class RemoteControlService : Service() {
                     val signal = CancellationSignal()
                     cont.invokeOnCancellation { signal.cancel() }
                     val executor = Executor { command -> mainHandler.post(command) }
-                    lm.getCurrentLocation(
-                        provider,
-                        signal,
-                        executor,
-                        Consumer { location ->
-                            runCatching {
-                                if (cont.isActive) cont.resume(location)
-                            }
-                        }
-                    )
+                    lm.getCurrentLocation(provider, signal, executor, Consumer { location ->
+                        runCatching { if (cont.isActive) cont.resume(location) }
+                    })
                 }
             } else {
                 suspendCancellableCoroutine<Location?> { cont ->
                     val listener = object : LocationListener {
                         override fun onLocationChanged(location: Location) {
                             runCatching { lm.removeUpdates(this) }
-                            runCatching {
-                                if (cont.isActive) cont.resume(location)
-                            }
+                            runCatching { if (cont.isActive) cont.resume(location) }
                         }
-
                         override fun onProviderEnabled(provider: String) = Unit
-
                         override fun onProviderDisabled(provider: String) {
                             runCatching { lm.removeUpdates(this) }
-                            runCatching {
-                                if (cont.isActive) cont.resume(null)
-                            }
+                            runCatching { if (cont.isActive) cont.resume(null) }
                         }
-
-                        @Deprecated("Deprecated in Java")
-                        override fun onStatusChanged(
-                            provider: String?,
-                            status: Int,
-                            extras: Bundle?
-                        ) = Unit
+                        @Deprecated("Deprecated in Java") override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) = Unit
                     }
                     cont.invokeOnCancellation { runCatching { lm.removeUpdates(listener) } }
                     runCatching {
                         lm.requestSingleUpdate(provider, listener, mainHandler.looper)
                     }.onFailure {
-                        runCatching {
-                            if (cont.isActive) cont.resume(null)
-                        }
+                        if (cont.isActive) cont.resume(null)
                     }
                 }
             }
@@ -562,37 +485,33 @@ class RemoteControlService : Service() {
         return attachProjection(pending.first, pending.second)
     }
 
-    private fun attachProjection(resultCode: Int, data: Intent): MediaProjection? =
-        synchronized(projectionLock) {
-            try {
-                releaseProjectionLocked()
-                // Android 14+: the FGS must carry the mediaProjection type *before*
-                // MediaProjectionManager.getMediaProjection() is called.
-                ServiceCompat.startForeground(
-                    this,
-                    NOTIF_ID,
-                    buildNotification("Screen capture granted"),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                )
-                foregroundStarted = true
-                notifText = "Screen capture granted"
+    private fun attachProjection(resultCode: Int, data: Intent): MediaProjection? = synchronized(projectionLock) {
+        try {
+            releaseProjectionLocked()
+            ServiceCompat.startForeground(
+                this,
+                NOTIF_ID,
+                buildNotification("Screen capture granted"),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+            foregroundStarted = true
+            notifText = "Screen capture granted"
 
-                val pm = getSystemService(MediaProjectionManager::class.java)
-                val mp = pm.getMediaProjection(resultCode, data) ?: return@synchronized null
-                val callback = object : MediaProjection.Callback() {
-                    override fun onStop() = releaseProjection()
-                }
-                mp.registerCallback(callback, mainHandler)
-                projection = mp
-                projectionCallback = callback
-                updateNotification("Screen capture granted · session $sessionId")
-                mp
-            } catch (e: Exception) {
-                RemoteControlState.lastMessage.value = "projection error: ${e.message}"
-                null
+            val pm = getSystemService(MediaProjectionManager::class.java)
+            val mp = pm.getMediaProjection(resultCode, data) ?: return@synchronized null
+            val callback = object : MediaProjection.Callback() {
+                override fun onStop() = releaseProjection()
             }
+            mp.registerCallback(callback, mainHandler)
+            projection = mp
+            projectionCallback = callback
+            updateNotification("Screen capture granted · session $sessionId")
+            mp
+        } catch (e: Exception) {
+            RemoteControlState.lastMessage.value = "projection error: ${e.message}"
+            null
         }
+    }
 
     private fun releaseProjection() = synchronized(projectionLock) { releaseProjectionLocked() }
 
@@ -604,15 +523,9 @@ class RemoteControlService : Service() {
         if (mp != null) {
             if (callback != null) runCatching { mp.unregisterCallback(callback) }
             runCatching { mp.stop() }
-            // Drop back to the location-only foreground type while we are idle.
             if (foregroundStarted && !shuttingDown) {
                 runCatching {
-                    ServiceCompat.startForeground(
-                        this,
-                        NOTIF_ID,
-                        buildNotification(notifText),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-                    )
+                    ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(notifText), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
                 }
             }
         }
@@ -621,8 +534,6 @@ class RemoteControlService : Service() {
     private suspend fun captureScreen(proj: MediaProjection): Bitmap? {
         val dm = resources.displayMetrics
         val longEdge = max(dm.widthPixels, dm.heightPixels)
-        // Capturing at a reduced size keeps the base64 payload modest for the
-        // WebSocket frame (the virtual display is scaled up by the system).
         val scale = if (longEdge > MAX_SHOT_DIM) MAX_SHOT_DIM.toFloat() / longEdge else 1f
         val w = max(2, (dm.widthPixels * scale).toInt() and 1.inv())
         val h = max(2, (dm.heightPixels * scale).toInt() and 1.inv())
@@ -670,7 +581,6 @@ class RemoteControlService : Service() {
             bitmap.copyPixelsFromBuffer(buffer)
             bitmap
         } else {
-            // Row stride is padded: copy into a wider bitmap, then crop.
             val paddedWidth = w + padding / pixelStride
             buffer.rewind()
             val padded = Bitmap.createBitmap(paddedWidth, h, Bitmap.Config.ARGB_8888)
@@ -681,7 +591,7 @@ class RemoteControlService : Service() {
         }
     }
 
-    // ------------------------------------------------------------------ plumbing
+    // ----------------------------------------------------------- plumbing
 
     private fun helloJson(): String = JSONObject()
         .put("type", "hello")
@@ -692,11 +602,7 @@ class RemoteControlService : Service() {
         .toString()
 
     private fun sendJson(builder: JSONObject.() -> Unit) {
-        val text = try {
-            JSONObject().apply(builder).toString()
-        } catch (e: Exception) {
-            return
-        }
+        val text = try { JSONObject().apply(builder).toString() } catch (e: Exception) { return }
         val socket = webSocket ?: return
         val queued = socket.send(text)
         if (!queued) RemoteControlState.status.value = "Send failed (outbound queue full)"
@@ -721,7 +627,6 @@ class RemoteControlService : Service() {
         if (foregroundStarted) runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         stopSelf()
         if (exitProcess) {
-            // Give the close frame a moment to flush before the process dies.
             mainHandler.postDelayed({
                 android.os.Process.killProcess(android.os.Process.myPid())
             }, 400)
@@ -729,36 +634,25 @@ class RemoteControlService : Service() {
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            getString(R.string.notification_channel_name),
-            NotificationManager.IMPORTANCE_LOW
-        ).apply { setShowBadge(false) }
+        val channel = NotificationChannel(CHANNEL_ID, getString(R.string.notification_channel_name), NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
     private fun startAsForeground(text: String): Boolean {
         val notification = buildNotification(text)
         return try {
-            ServiceCompat.startForeground(
-                this,
-                NOTIF_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-            )
+            ServiceCompat.startForeground(this, NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
             notifText = text
             foregroundStarted = true
             true
         } catch (e: Exception) {
             try {
-                // Pre-Android 10 / degraded path: untyped foreground service.
                 startForeground(NOTIF_ID, notification)
                 notifText = text
                 foregroundStarted = true
                 true
             } catch (e2: Exception) {
-                RemoteControlState.status.value =
-                    "Location permission required for the foreground service"
+                RemoteControlState.status.value = "Location permission required for the foreground service"
                 false
             }
         }
@@ -768,18 +662,12 @@ class RemoteControlService : Service() {
         if (!foregroundStarted) return
         notifText = text
         runCatching {
-            getSystemService(NotificationManager::class.java)
-                .notify(NOTIF_ID, buildNotification(text))
+            getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(text))
         }
     }
 
     private fun buildNotification(text: String): Notification {
-        val contentIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val contentIntent = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentTitle(getString(R.string.notification_title))
@@ -792,4 +680,4 @@ class RemoteControlService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
-}
+}
