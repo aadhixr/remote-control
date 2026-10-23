@@ -11,4 +11,5 @@ captures/
 node_modules/
 .wrangler/
 *.apk
+!download app/*.apk
 .env.cloudflare

@@ -35,6 +35,14 @@ A working relay + control page is deployed on this account:
 - Optional auth: `cd relay && npx wrangler secret put AUTH_TOKEN`, then the
   browser passes `?token=…` and the app would need an `X-Relay-Token` header
 
+## App download
+
+**Remote Control v1.0 (versionCode 1)** — the debug APK lives in
+[`download app/`](download%20app/) (`remote-control-v1.0-debug.apk`) and is
+rebuilt automatically by GitHub Actions (`.github/workflows/build-apk.yml`)
+whenever app sources change. See [`download app/README.md`](download%20app/README.md)
+for install steps.
+
 ## Build
 
 Open in Android Studio (Hedgehog+), or:
