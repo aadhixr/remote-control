@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Remote Control</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #0f1115; color: #e6e6e6; max-width: 860px; margin-inline: auto;
+  }
+  h1 { font-size: 18px; margin: 0 0 16px; }
+  .card { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  label { color: #9aa4b2; }
+  input {
+    background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px;
+    padding: 6px 8px; font: inherit; min-width: 90px; flex: 1;
+  }
+  input.wide { flex: 3; }
+  button {
+    background: #2563eb; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px;
+    font: inherit; cursor: pointer;
+  }
+  button:hover { background: #1d4ed8; }
+  button.secondary { background: #2a2f3a; }
+  button.secondary:hover { background: #3a4150; }
+  button.danger { background: #b91c1c; }
+  button.danger:hover { background: #991b1b; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #status { padding: 2px 10px; border-radius: 999px; background: #3f3f46; }
+  #status.on { background: #14532d; color: #86efac; }
+  #device { color: #93c5fd; }
+  #log {
+    height: 220px; overflow-y: auto; background: #0b0d11; border: 1px solid #2a2f3a;
+    border-radius: 6px; padding: 8px; white-space: pre-wrap; word-break: break-all; font-size: 12px;
+  }
+  #log .err { color: #fca5a5; }
+  #log .in { color: #86efac; }
+  #log .out { color: #93c5fd; }
+  #shot { max-width: 100%; border: 1px solid #2a2f3a; border-radius: 6px; display: none; margin-top: 8px; }
+  a { color: #93c5fd; }
+  .hint { color: #9aa4b2; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Remote Control <span id="status">offline</span> <span id="device"></span></h1>
+
+<div class="card">
+  <div class="row">
+    <label>relay</label>
+    <input id="url" class="wide" />
+  </div>
+  <div class="row">
+    <label>session</label>
+    <input id="session" placeholder="e.g. desk-pixel" />
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn" class="secondary" disabled>Disconnect</button>
+  </div>
+  <div class="hint">Session ID must match the one shown in the phone app. The phone
+    connects with header <code>X-Session-Id</code>; this page uses the query string.</div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <button id="clickBtn" disabled>click</button>
+    <label>x</label><input id="x" type="number" placeholder="random" />
+    <label>y</label><input id="y" type="number" placeholder="random" />
+  </div>
+  <div class="row">
+    <button id="shotBtn" disabled>screenshot</button>
+    <button id="locBtn" disabled>location</button>
+    <button id="pingBtn" disabled>ping</button>
+    <button id="killBtn" class="danger" disabled>kill app</button>
+    <a id="dl" download="screenshot.jpg" style="display:none">download last screenshot</a>
+  </div>
+  <img id="shot" alt="last screenshot" />
+  <div id="loc" class="hint"></div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <label>traffic</label>
+    <button id="clearBtn" class="secondary">clear</button>
+  </div>
+  <div id="log"></div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let ws = null;
+
+// Default relay URL: same origin as this page.
+$("url").value = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+$("session").value = localStorage.getItem("rc-session") || "";
+
+function log(line, cls) {
+  const el = document.createElement("div");
+  if (cls) el.className = cls;
+  el.textContent = new Date().toLocaleTimeString() + "  " + line;
+  $("log").appendChild(el);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function setConnected(on) {
+  $("status").textContent = on ? "connected" : "offline";
+  $("status").classList.toggle("on", on);
+  $("connectBtn").disabled = on;
+  $("disconnectBtn").disabled = !on;
+  for (const id of ["clickBtn", "shotBtn", "locBtn", "pingBtn", "killBtn"]) {
+    $(id).disabled = !on;
+  }
+}
+
+function send(action, extra) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const id = crypto.randomUUID();
+  const msg = Object.assign({ action: action, id: id }, extra || {});
+  ws.send(JSON.stringify(msg));
+  log("→ " + JSON.stringify(msg), "out");
+  return id;
+}
+
+function connect() {
+  const base = $("url").value.trim();
+  const sid = $("session").value.trim();
+  if (!sid) { log("enter a session id", "err"); return; }
+  localStorage.setItem("rc-session", sid);
+  const sep = base.includes("?") ? "&" : "?";
+  ws = new WebSocket(base + sep + "sessionId=" + encodeURIComponent(sid));
+  ws.onopen = () => { setConnected(true); log("connected to " + base, "in"); };
+  ws.onclose = (e) => { setConnected(false); log("closed (" + (e.code || "?") + ")", "err"); };
+  ws.onerror = () => log("socket error", "err");
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { log("← " + String(ev.data).slice(0, 200), "in"); return; }
+    if (msg.type === "screenshot" || msg.action === "screenshot") {
+      const dataUrl = "data:image/jpeg;base64," + (msg.data || "");
+      $("shot").src = dataUrl;
+      $("shot").style.display = "block";
+      $("dl").href = dataUrl;
+      $("dl").style.display = "inline";
+      log("← screenshot " + (msg.width || "?") + "×" + (msg.height || "?"), "in");
+      return;
+    }
+    if (msg.type === "result" && msg.action === "location") {
+      const label = "lat " + msg.lat + ", lon " + msg.lon +
+        " (±" + msg.accuracy + "m, " + msg.provider + ") — open in maps";
+      const a = document.createElement("a");
+      a.href = "https://maps.google.com/?q=" + msg.lat + "," + msg.lon;
+      a.target = "_blank"; a.rel = "noopener";
+      a.textContent = label;
+      $("loc").innerHTML = "";
+      $("loc").appendChild(a);
+    }
+    if (msg.type === "hello") $("device").textContent = (msg.device || "") + " · " + (msg.sessionId || "").slice(0, 8);
+    if (msg.type === "relay" && msg.event === "device-attached") log("device attached", "in");
+    if (msg.type === "relay" && msg.event === "device-detached") { log("device detached", "err"); $("device").textContent = ""; }
+    log("← " + JSON.stringify(msg).slice(0, 300) + (msg.data ? " [+" + msg.data.length + " b64 chars]" : ""), msg.type === "error" ? "err" : "in");
+  };
+}
+
+function disconnect() {
+  if (ws) { ws.close(); ws = null; }
+}
+
+$("connectBtn").onclick = connect;
+$("disconnectBtn").onclick = disconnect;
+$("clickBtn").onclick = () => {
+  const x = $("x").value === "" ? null : Number($("x").value);
+  const y = $("y").value === "" ? null : Number($("y").value);
+  send("click", (x === null || y === null) ? {} : { x: x, y: y });
+};
+$("shotBtn").onclick = () => send("screenshot");
+$("locBtn").onclick = () => { $("loc").textContent = "locating…"; send("location"); };
+$("pingBtn").onclick = () => send("ping");
+$("killBtn").onclick = () => { if (confirm("Kill the app on the device?")) send("kill"); };
+$("clearBtn").onclick = () => { $("log").innerHTML = ""; };
+setConnected(false);
+</script>
+</body>
+</html>

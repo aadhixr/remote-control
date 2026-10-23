@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Platform theme only: Compose supplies all actual UI styling. -->
+    <style name="Theme.RemoteControl" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

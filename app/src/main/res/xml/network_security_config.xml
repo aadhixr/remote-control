@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      The default relay is wss:// (encrypted), so no cleartext is needed.
+      The entries below only cover LOCAL development (emulator -> host),
+      e.g. running `wrangler dev` and connecting with ws://10.0.2.2:8787/ws.
+      Never add a real production host here — use wss://.
+    -->
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>
