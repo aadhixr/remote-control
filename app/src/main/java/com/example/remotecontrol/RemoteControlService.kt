@@ -151,9 +151,10 @@ class RemoteControlService : Service() {
 
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         sessionId = prefs.getString(KEY_SESSION_ID, null)
-            ?: Build.MODEL.contains('/')
-                ? Build.MODEL.split('/').first()
-                : Build.MODEL
+            ?: when {
+                Build.MODEL.contains('/') -> Build.MODEL.split('/').first()
+                else -> Build.MODEL
+            }
        .also {
             prefs.edit().putString(KEY_SESSION_ID, it).apply()
         }
