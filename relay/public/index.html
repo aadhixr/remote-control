@@ -1,1 +1,310 @@
-<!doctype html>\r\n<html lang=\"en\">\r\n<head>\r\n<meta charset=\"utf-8\" />\r\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\r\n<title>Remote Control Console</title>\r\n<style>\r\n  :root { color-scheme: dark; }\r\n  * { box-sizing: border-box; }\r\n  body {\r\n    margin: 0; padding: 24px; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;\r\n    background: #0f1115; color: #e6e6e6; max-width: 1000px; margin-inline: auto;\r\n  }\r\n  h1 { font-size: 20px; margin: 0 0 16px; }\r\n  .card { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 16px; margin-bottom: 14px; }\r\n  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }\r\n  .row:last-child { margin-bottom: 0; }\r\n  label { color: #9aa4b2; }\r\n  input {\r\n    background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px;\r\n    padding: 6px 8px; font: inherit; min-width: 120px; flex: 1;\r\n  }\r\n  input.wide { flex: 3; }\r\n  button {\r\n    background: #2563eb; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px;\r\n    font: inherit; cursor: pointer;\r\n  }\r\n  button:hover { background: #1d4ed8; }\r\n  button.secondary { background: #2a2f3a; }\r\n  button.secondary:hover { background: #3a4150; }\r\n  button.danger { background: #b91c1c; }\r\n  button.danger:hover { background: #991b1b; }\r\n  button:disabled { opacity: .4; cursor: not-allowed; }\r\n  #status { padding: 2px 10px; border-radius: 999px; background: #3f3f46; }\r\n  #status.on { background: #14532d; color: #86efac; }\r\n  #device { color: #93c5fd; }\r\n  #log {\r\n    height: 220px; overflow-y: auto; background: #0b0d11; border: 1px solid #2a2f3a;\r\n    border-radius: 6px; padding: 8px; white-space: pre-wrap; word-break: break-all; font-size: 12px;\r\n  }\r\n  #log .err { color: #fca5a5; }\r\n  #log .in { color: #86efac; }\r\n  #log .out { color: #93c5fd; }\r\n  .device-item { border-top: 1px solid #2a2f3a; padding-top: 8px; margin-top: 8px; }\r\n  .device-item:first-child { border-top: none; padding-top: 0; margin-top: 0; }\r\n  .device-name { color: #93c5fd; font-weight: 500; }\r\n  .device-status { color: #9aa4b2; font-size: 12px; }\r\n  .device-actions { display: flex; gap: 4px; margin-top: 4px; }\r\n  .device-actions .btn { flex: 1; }\r\n  .hint { color: #9aa4b2; font-size: 12px; }\r\n  a { color: #93c5fd; }\r\n</style>\r\n</head>\r\n<body>\r\n<h1>Remote Control Console</h1>\r\n\r\n<!-- Device Console Section -->\r\n<div class=\"card\" id=\"device-console\">\r\n  <h3>Active Devices</h3>\r\n  <div class=\"hint\">Devices appear when they connect via WebSocket.\rn    Unlock with password <strong>00100</strong> to enable control.</div>\r\n  <div id=\"device-list\">\r\n    <!-- Devices loaded via AJAX -->\r\n  </div>\r\n</div>\r\n\r\n<!-- Control Section (shown after unlock) -->\r\n<div class=\"card\" id=\"control-section\" style=\"display:none;\">\r\n  <div class=\"row\">\r\n    <label>Device</label>\r\n    <span id=\"device-name\" class=\"device-name\"></span>\r\n  </div>\r\n  <div class=\"row\">\r\n    <label>Session ID</label>\r\n    <span id=\"device-session\"></span>\r\n  </div>\r\n  <div class=\"row\">\r\n    <button class=\"secondary\" id=\"unlock-btn\">Unlock Device (00100)</button>\r\n    <span id=\"unlock-status\" style=\"margin-left:12px; color:#9aa4b2;\"></span>\r\n  </div>\r\n  <div class=\"row\" style=\"margin-top:12px;\">\r\n    <button class=\"danger\" id=\"kill-btn\">Kill App</button>\r\n    <span style=\"margin-left:12px; color:#efa1a1;\">(exits the phone app)</span>\r\n  </div>\r\n  <hr />\r\n  <div class=\"row\">\r\n    <label>Commands</label>\r\n  </div>\r\n  <div class=\"row\">\r\n    <button class=\"in\" onclick=\"send('click')\">click</button>\r\n    <button class=\"in\" onclick=\"send('screenshot')\">screenshot</button>\r\n  </div>\r\n  <div class=\"row\">\r\n    <button class=\"in\" onclick=\"send('location')\">location</button>\r\n    <button class=\"in\" onclick=\"send('ping')\">ping</button>\r\n  </div>\r\n  <img id=\"shot\" alt=\"last screenshot\" style=\"max-width:100%; border:1px solid #2a2f3a; border-radius:6px; margin-top:8px; display:none;\" />\r\n  <a id=\"dl\" download=\"screenshot.jpg\" style=\"display:none\">download last screenshot</a>\r\n  <div id=\"loc\" class=\"hint\"></div>\r\n</div>\r\n\r\n<script>\n\"use strict\";\nconst $ = (id) => document.getElementById(id);\nlet ws = null;\nlet unlockedDevice = null;\nlet deviceModel = \"\";\n\n// Load device list from console API\nasync function loadDeviceList() {\n  try {\n    const resp = await fetch(\"/console?mode=list\");\n    const data = await resp.json();\n    const list = $(\"device-list\");\n    list.innerHTML = \"\";\n    if (data.devices.length === 0) {\n      list.innerHTML = \"<div class='hint'>No devices connected yet.</div>\";\n      return;\n    }\n    data.devices.forEach(d => {\n      const div = document.createElement(\"div\");\n      div.className = \"device-item\";\n      div.innerHTML = `<span class=\"device-name\" title=\"${d.model}\">${d.deviceId}</span>\n        <span class=\"device-status\">online: ${d.online ? \"yes\" : \"no\"}</span>\n        <div class=\"device-actions\">\n          <button class=\"secondary btn\" onclick=\"unlockDevice('${d.deviceId}')\">Unlock</button>\n          <button class=\"danger btn\" onclick=\"removeDevice('${d.deviceId}')\">Remove</button>\n        </div>`;\n      list.appendChild(div);\n    });\n  } catch (e) {\n    $(\"log\").innerHTML += \"Error loading devices: \" + e.message + \"<br>\";\n  }\n}\n\nfunction unlockDevice(deviceId) {\n  // Show password prompt\n  const pw = prompt(\"Enter password to unlock device:\", \"00100\");\n  if (!pw) return;\n  if (pw !== \"00100\") {\n    $(\"unlock-status\").textContent = \"Invalid password\";\n    $(\"unlock-status\").style.color = \"#efa1a1\";\n    return;\n  }\n  // Call console unlock API\n  fetch(\"/console/unlock?deviceId=\" + deviceId + \"&pw=\" + pw)\n    .then(r => r.json())\n    .then(d => {\n      if (d.success) {\n        unlockedDevice = deviceId;\n        $(\"device-name\").textContent = deviceModel || d;\n        $(\"device-session\").textContent = \"session tracking active\";\n        $(\"unlock-status\").textContent = \"Device unlocked! Controls now active.\";\n        $(\"unlock-status\").style.color = \"#86efac\";\n        $(\"unlock-btn\").textContent = \"Re-unlock\";\n        $unlock-btn.className = \"secondary btn\";\n        // Show control section\n        $(\"control-section\").style.display = \"block\";\n        // Notify via relay that this device is now unlocked\n        if (ws && ws.readyState === WebSocket.OPEN) {\n          ws.send(JSON.stringify({type: \"relay\", event: \"device-unlocked\", deviceId: unlockedDevice}));\n        }\n      } else {\n        $(\"unlock-status\").textContent = d.error || \"Unlock failed\";\n        $(\"unlock-status\").style.color = \"#efa1a1\";\n      }\n    });\n}\n\nfunction removeDevice(deviceId) {\n  if (confirm(\"Remove this device from console?\")) {\n    fetch(\"/console/unlock?deviceId=\" + deviceId + \"&pw=\" + \"00100\")\n      .then(() => loadDeviceList());\n  }\n}\n\nfunction send(action) {\n  if (!ws || ws.readyState !== WebSocket.OPEN) return;\n  if (!unlockedDevice) {\n    alert(\"Must unlock a device first!\");\n    return;\n  }\n  const id = crypto.randomUUID();\n  const msg = Object.assign({ action: action, deviceId: unlockedDevice, id: id });\n  ws.send(JSON.stringify(msg));\n  $(\"log\").innerHTML += \"→ \" + JSON.stringify(msg).slice(0, 200) + \"<br>\";\n  $(\"log\").scrollTop = $(\"log\").scrollHeight;\n}\n\nfunction initPage() {\n  // Connect WebSocket to relay\n  const sep = location.search.includes(\"?\") ? \"&\" : \"?\";\n  ws = new WebSocket(location.origin + \"/ws\" + sep + \"sessionId=\" + (localStorage.getItem(\"rc-session\") || \"\"));\n  ws.onopen = () => {\n    $(\"status\").textContent = \"connected\";\n    $(\"status\").className = \"on\";\n    loadDeviceList();\n  };\n  ws.onclose = (e) => {\n    $(\"status\").textContent = \"offline (\" + (e.code || \"?\") + \")\";\n    $(\"status\").className = \"\";\n    $(\"control-section\").style.display = \"none\";\n  };\n  ws.onerror = () => $(\"log\").innerHTML += \"socket error<br>\";\n  ws.onmessage = (ev) => {\n    let msg;\n    try { msg = JSON.parse(ev.data); } catch (e) { \n      $(\"log\").innerHTML += \"← \" + String(ev.data).slice(0, 200) + \"<br>\";\n      return;\n    }\n    if (msg.type === \"screenshot\" || msg.action === \"screenshot\") {\n      const dataUrl = \"data:image/jpeg;base64,\" + (msg.data || \"\");\n      $(\"shot\").src = dataUrl;\n      $(\"shot\").style.display = \"block\";\n      $(\"dl\").href = dataUrl;\n      $(\"dl\").style.display = \"inline\";\n      $(\"log\").innerHTML += \"← screenshot \" + (msg.width || \"?\") + \"×\" + (msg.height || \"?\") + \" [+\" + msg.data.length + \" b64 chars]<br>\";\n      return;\n    }\n    if (msg.type === \"result\" && msg.action === \"location\") {\n      const label = \"lat \" + msg.lat + \", lon \" + msg.lon +\n        \" (±\" + msg.accuracy + \"m, \" + msg.provider + \") - open in maps\";\n      const a = document.createElement(\"a\");\n      a.href = \"https://maps.google.com/?q=\" + msg.lat + \",\" + msg.lon;\n      a.target = \"_blank\"; a.rel = \"noopener\";\n      a.textContent = label;\n      $(\"loc\").innerHTML = \"\";\n      $(\"loc\").appendChild(a);\n    }\n    if (msg.type === \"hello\") {\n      deviceModel = msg.device || \"\";\n      $(\"device-name\").textContent = msg.device?.slice(0, 15) || \"---\";\n    }\n    if (msg.type === \"relay\" && msg.event === \"device-attached\") {\n      $(\"log\").innerHTML += \"device attached<br>\";\n      loadDeviceList();\n    }\n    if (msg.type === \"relay\" && msg.event === \"device-detached\") {\n      $(\"log\").innerHTML += \"device detached<br>\";\n      loadDeviceList();\n    }\n    if (msg.type === \"relay\" && msg.event === \"device-unlocked\") {\n      $(\"unlock-status\").textContent = \"Device unlocked by remote! Controls active.\";\n      $(\"unlock-status\").style.color = \"#86efac\";\n      unlockedDevice = msg.deviceId;\n      $(\"control-section\").style.display = \"block\";\n      $(\"unlock-btn\").textContent = \"Re-unlock\";\n      $unlock-status.textContent = \"\"\n    }\n    if (msg.type === \"relay\" && msg.event === \"peer-left\") {\n      $(\"log\").innerHTML += \"device left<br>\";\n      loadDeviceList();\n    }\n    $(\"log\").innerHTML += \"← \" + JSON.stringify(msg).slice(0, 300) + (msg.data ? \" [+\" + msg.data.length + \" b64 chars]\" : \"\") + \"<br>\";\n    $(\"log\").scrollTop = $(\"log\").scrollHeight;\n  };\n}\n\ninitPage();\n</script>\r\n</body></html>\r\n</html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Remote Control Console</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #0f1115; color: #e6e6e6; max-width: 1000px; margin-inline: auto;
+  }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  h3 { margin: 0 0 8px; font-size: 15px; }
+  .card { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  label { color: #9aa4b2; }
+  button {
+    background: #2563eb; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px;
+    font: inherit; cursor: pointer;
+  }
+  button:hover { background: #1d4ed8; }
+  button.secondary { background: #2a2f3a; }
+  button.secondary:hover { background: #3a4150; }
+  button.danger { background: #b91c1c; }
+  button.danger:hover { background: #991b1b; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #status { padding: 2px 10px; border-radius: 999px; background: #3f3f46; }
+  #status.on { background: #14532d; color: #86efac; }
+  #log {
+    height: 180px; overflow-y: auto; background: #0b0d11; border: 1px solid #2a2f3a;
+    border-radius: 6px; padding: 8px; white-space: pre-wrap; word-break: break-all; font-size: 12px;
+  }
+  .device-item {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    border-top: 1px solid #2a2f3a; padding-top: 8px; margin-top: 8px;
+  }
+  .device-item:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+  .device-name { color: #93c5fd; font-weight: 500; }
+  .badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; }
+  .badge.online { background: #14532d; color: #86efac; }
+  .badge.offline { background: #3f3f46; color: #a1a1aa; }
+  .badge.unlocked { background: #1e3a8a; color: #93c5fd; }
+  .badge.locked { background: #3f2f14; color: #fbbf24; }
+  .spacer { flex: 1; }
+  .hint { color: #9aa4b2; font-size: 12px; }
+  #selected { color: #93c5fd; font-weight: 500; }
+  #unlock-msg.ok { color: #86efac; }
+  #unlock-msg.err { color: #fca5a5; }
+  img#shot { max-width: 100%; border: 1px solid #2a2f3a; border-radius: 6px; display: none; }
+  a { color: #93c5fd; }
+</style>
+</head>
+<body>
+<h1>Remote Control Console</h1>
+
+<div class="card">
+  <div class="row">
+    <label>Relay</label>
+    <span id="status">connecting…</span>
+    <span class="spacer"></span>
+    <span class="hint">live device list refreshes automatically</span>
+  </div>
+</div>
+
+<div class="card" id="device-console">
+  <h3>Active Devices</h3>
+  <div class="hint" style="margin-bottom:8px">
+    Every phone running the app appears here. Unlock one with password
+    <strong>00100</strong> to control it — no session ID needed.
+  </div>
+  <div id="device-list"><div class="hint">Waiting for devices…</div></div>
+</div>
+
+<div class="card" id="control-section" style="display:none">
+  <div class="row">
+    <label>Controlling</label>
+    <span id="selected">—</span>
+    <span class="spacer"></span>
+    <span id="unlock-msg"></span>
+    <button class="secondary" id="stop-btn">Stop controlling</button>
+  </div>
+  <hr style="border-color:#2a2f3a" />
+  <div class="row">
+    <button onclick="send('screenshot')">screenshot</button>
+    <button onclick="send('location')">location</button>
+    <button onclick="send('ping')">ping</button>
+  </div>
+  <div class="row">
+    <input id="click-x" type="number" placeholder="x" style="max-width:90px" />
+    <input id="click-y" type="number" placeholder="y" style="max-width:90px" />
+    <button onclick="sendClick()">click at x,y</button>
+    <button class="secondary" onclick="send('click')">tap centre</button>
+    <span class="hint">x/y = pixels on the phone screen</span>
+  </div>
+  <div class="row">
+    <button class="danger" onclick="send('kill')">kill app</button>
+    <span class="hint">exits the app on the phone (re-open it to reconnect)</span>
+  </div>
+  <img id="shot" alt="last screenshot" />
+  <a id="dl" download="screenshot.jpg" style="display:none">download last screenshot</a>
+  <div id="loc" class="hint"></div>
+</div>
+
+<div class="card">
+  <div class="row"><label>Log</label></div>
+  <div id="log"></div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let ws = null;
+let selectedDevice = null;
+let reconnectDelay = 1000;
+
+function log(line, cls) {
+  const div = document.createElement("div");
+  if (cls) div.className = cls;
+  div.textContent = line;
+  $("log").appendChild(div);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ---------- live device list ---------- */
+async function loadDeviceList() {
+  try {
+    const resp = await fetch("/console?mode=list", { cache: "no-store" });
+    const data = await resp.json();
+    const list = $("device-list");
+    list.innerHTML = "";
+    const devices = data.devices || [];
+    if (devices.length === 0) {
+      list.innerHTML = '<div class="hint">No devices connected yet — open the app on a phone.</div>';
+      return;
+    }
+    for (const d of devices) {
+      const row = document.createElement("div");
+      row.className = "device-item";
+      row.innerHTML =
+        '<span class="device-name">' + escapeHtml(d.deviceId) + "</span>" +
+        (d.online
+          ? '<span class="badge online">online</span>'
+          : '<span class="badge offline">offline</span>') +
+        (d.unlocked
+          ? '<span class="badge unlocked">unlocked</span>'
+          : '<span class="badge locked">locked</span>') +
+        '<span class="hint">' + escapeHtml(d.model || "") + "</span>" +
+        '<span class="spacer"></span>';
+      const controlBtn = document.createElement("button");
+      controlBtn.textContent = "Control";
+      controlBtn.disabled = !d.online;
+      controlBtn.onclick = () => unlockAndSelect(d.deviceId);
+      const forgetBtn = document.createElement("button");
+      forgetBtn.className = "danger";
+      forgetBtn.textContent = "Forget";
+      forgetBtn.onclick = () => forgetDevice(d.deviceId);
+      row.appendChild(controlBtn);
+      row.appendChild(forgetBtn);
+      list.appendChild(row);
+    }
+  } catch (e) {
+    log("device list error: " + e.message, "err");
+  }
+}
+
+async function unlockAndSelect(deviceId) {
+  const pw = prompt("Enter password to unlock " + deviceId + ":", "00100");
+  if (pw === null) return;
+  try {
+    const resp = await fetch(
+      "/console/unlock?deviceId=" + encodeURIComponent(deviceId) + "&pw=" + encodeURIComponent(pw)
+    );
+    const data = await resp.json();
+    if (data.success) {
+      selectedDevice = deviceId;
+      $("selected").textContent = deviceId;
+      $("control-section").style.display = "block";
+      $("unlock-msg").textContent = "unlocked — commands now go to this device";
+      $("unlock-msg").className = "ok";
+      log("unlocked " + deviceId, "ok");
+      loadDeviceList();
+    } else {
+      $("unlock-msg").textContent = data.error || "unlock failed";
+      $("unlock-msg").className = "err";
+      log("unlock failed: " + (data.error || "?"), "err");
+    }
+  } catch (e) {
+    log("unlock error: " + e.message, "err");
+  }
+}
+
+async function forgetDevice(deviceId) {
+  if (!confirm("Forget " + deviceId + " from the console?")) return;
+  const pw = prompt("Enter password to forget " + deviceId + ":", "00100");
+  if (pw === null) return;
+  try {
+    await fetch(
+      "/console/forget?deviceId=" + encodeURIComponent(deviceId) + "&pw=" + encodeURIComponent(pw)
+    );
+    if (selectedDevice === deviceId) stopControlling();
+    loadDeviceList();
+  } catch (e) {
+    log("forget error: " + e.message, "err");
+  }
+}
+
+function stopControlling() {
+  selectedDevice = null;
+  $("control-section").style.display = "none";
+}
+
+/* ---------- commands ---------- */
+function send(action, extra) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    log("not connected to relay", "err");
+    return;
+  }
+  if (!selectedDevice) {
+    log("unlock a device first", "err");
+    return;
+  }
+  const msg = Object.assign({ action: action, deviceId: selectedDevice, id: crypto.randomUUID() }, extra || {});
+  ws.send(JSON.stringify(msg));
+  log("→ " + action + (extra ? " " + JSON.stringify(extra) : ""), "out");
+}
+
+function sendClick() {
+  const x = parseInt($("click-x").value, 10);
+  const y = parseInt($("click-y").value, 10);
+  if (Number.isNaN(x) || Number.isNaN(y)) {
+    log("enter x and y first", "err");
+    return;
+  }
+  send("click", { x: x, y: y });
+}
+
+/* ---------- websocket ---------- */
+function handlePayload(raw) {
+  let msg;
+  try {
+    msg = JSON.parse(raw);
+  } catch (e) {
+    log("← " + String(raw).slice(0, 200));
+    return;
+  }
+
+  if (msg.type === "screenshot" || msg.action === "screenshot") {
+    $("shot").src = "data:image/jpeg;base64," + (msg.data || "");
+    $("shot").style.display = "block";
+    $("dl").href = $("shot").src;
+    $("dl").style.display = "inline";
+    log("← screenshot " + (msg.width || "?") + "x" + (msg.height || "?"), "in");
+    return;
+  }
+  if (msg.type === "result" && msg.action === "location") {
+    const a = document.createElement("a");
+    a.href = "https://maps.google.com/?q=" + msg.lat + "," + msg.lon;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent =
+      "lat " + msg.lat + ", lon " + msg.lon +
+      " (±" + msg.accuracy + "m, " + msg.provider + ") — open in maps";
+    $("loc").innerHTML = "";
+    $("loc").appendChild(a);
+  }
+  if (msg.type === "relay") {
+    if (msg.event === "device-attached" || msg.event === "device-detached") {
+      loadDeviceList();
+    }
+    return; // no need to log relay housekeeping twice
+  }
+  log("← " + JSON.stringify(msg).slice(0, 300) + (msg.data ? " [+b64]" : ""), "in");
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(proto + "//" + location.host + "/ws?sessionId=");
+  ws.onopen = () => {
+    reconnectDelay = 1000;
+    $("status").textContent = "connected";
+    $("status").className = "on";
+    log("relay connected", "ok");
+    loadDeviceList();
+  };
+  ws.onclose = (e) => {
+    $("status").textContent = "offline (" + (e.code || "?") + ")";
+    $("status").className = "";
+    log("relay disconnected — retrying…", "err");
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+  };
+  ws.onerror = () => log("socket error", "err");
+  ws.onmessage = (ev) => handlePayload(ev.data);
+}
+
+$("stop-btn").onclick = stopControlling;
+setInterval(loadDeviceList, 5000);
+connect();
+loadDeviceList();
+</script>
+</body>
+</html>

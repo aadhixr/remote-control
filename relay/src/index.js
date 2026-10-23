@@ -1,1 +1,395 @@
-/**\n * WebSocket relay for Remote Control Android App.\n * Features:\n *   - One Durable Object per sessionId\n *   - Device Console: list all active devices, unlock with password "00100"\n *   - After unlock: full remote control of that device\n *   - Device ID = Build.MODEL (e.g., "Pixel 7", "moto g85 5G")\n *\n * URL shapes:\n *   /ws?sessionId=<id>         (browser connects to session)\n *   /ws?sessionId=<id>&role=device  (device connects)\n *   /healthz                       (health check)\n *\n * Console commands:\n *   GET /console                     (list all devices + status)\n *   POST /console/unlock             (unlock device with password "00100")\n *   Body: { deviceId: "Pixel 7" }\n */\n\nconst ROLE_TAG_DEVICE = \"device\";\nconst ROLE_TAG_BROWSER = \"browser\";\nconst UNLOCK_PASSWORD = \"00100\";\n\n// Device tracking: deviceId -> {sessionId, model, unlocked, ws}\nconst devices = Object.create(null);\n\nfunction safeSend(ws, data) {\n  try {\n    ws.send(data);\n  } catch (e) {\n    /* socket already closing */\n  }\n}\n\nfunction roleOf(ws) {\n  if (ws.tags && ws.tags.includes(ROLE_TAG_DEVICE)) return ROLE_TAG_DEVICE;\n  if (ws.tags && ws.tags.includes(ROLE_TAG_BROWSER)) return ROLE_TAG_BROWSER;\n  try {\n    const att = ws.deserializeAttachment();\n    if (att && att.role) return att.role;\n  } catch (e) {\n    /* ignore */\n  }\n  return ROLE_TAG_BROWSER;\n}\n\nexport class SessionDO {\n  constructor(state) {\n    this.state = state;\n  }\n\n  async fetch(request) {\n    const url = new URL(request.url);\n\n    // --- Console API ---\n    if (url.pathname === \"/console\") {\n      if (url.searchParams.get(\"mode\") === \"list\") {\n        // List all known devices for this DO (per-session)\n        const list = Object.entries(devices)\n          .filter(([, info]) => info.sessionId === url.searchParams.get(\"sessionId\") || url.searchParams.get(\"sessionId\") === \"default\")\n          .map(([deviceId, info]) => ({\n            deviceId,\n            model: info.model,\n            online: info.online,\n            unlocked: info.unlocked,\n            role: info.role\n          }));\n        return new Response(JSON.stringify({devices: list}), {\n          headers: {\"content-type\": \"application/json\"}\n        });\n      }\n      if (url.pathname.endsWith(\"/unlock\") && url.method === \"POST\") {\n        // Unlock a device with password \"00100\"\n        // In a real impl, read body; for simplicity, query param pw\n        const deviceId = url.searchParams.get(\"deviceId\");\n        const pw = url.searchParams.get(\"pw\");\n        if (pw !== UNLOCK_PASSWORD) {\n          return new Response(JSON.stringify({error: \"invalid password\"}), {\n            status: 403,\n            headers: {\"content-type\": \"application/json\"}\n          });\n        }\n        if (!devices[deviceId]) {\n          return new Response(JSON.stringify({error: \"unknown device\"}), {\n            status: 404,\n            headers: {\"content-type\": \"application/json\"}\n          });\n        }\n        devices[deviceId].unlocked = true;\n        // Notify all browsers of this device unlock\n        const payload = JSON.stringify({\n          type: \"relay\",\n          event: \"device-unlocked\",\n          deviceId: deviceId\n        });\n        for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {\n          safeSend(b, payload);\n        }\n        return new Response(JSON.stringify({success: true, deviceId}), {\n          headers: {\"content-type\": \"application/json\"}\n        });\n      }\n      return new Response(JSON.stringify({error: \"unknown console mode\"}), {\n        status: 400,\n        headers: {\"content-type\": \"application/json\"}\n      });\n    }\n\n    if (request.headers.get(\"Upgrade\")?.toLowerCase() !== \"websocket\") {\n      return new Response(\"Expected a WebSocket upgrade\\n\", { status: 426 });\n    }\n\n    const role =\n      url.searchParams.get(\"role\") === \"device\" ||\n      request.headers.get(\"X-Role\") === \"device\"\n        ? ROLE_TAG_DEVICE\n        : ROLE_TAG_BROWSER;\n    const session =\n      url.searchParams.get(\"sessionId\") ||\n      request.headers.get(\"X-Session-Id\") ||\n      \"default\";\n\n    // Register device in global trackers\n    if (role === ROLE_TAG_DEVICE) {\n      devices[session] = devices[session] || {\n        sessionId: session,\n        model: url.searchParams.get(\"model\") || \"unknown\",\n        online: false,\n        unlocked: false,\n        role: \"device\"\n      };\n      // Update online status when device has at least one browser sibling\n      const online = this.state.getWebSockets(ROLE_TAG_DEVICE).length > 0;\n      if (devices[session]) devices[session].online = online;\n    }\n\n    const pair = new WebSocketPair();\n    const [client, server] = Object.values(pair);\n\n    if (role === ROLE_TAG_DEVICE) {\n      for (const old of this.state.getWebSockets(ROLE_TAG_DEVICE)) {\n        try {\n          old.close(4000, \"replaced by a new device connection\");\n        } catch (e) {\n          /* ignore */\n        }\n      }\n    }\n\n    server.serializeAttachment({ role, session });\n    await this.state.acceptWebSocket(server, [role]);\n\n    const online = this.state.getWebSockets(ROLE_TAG_DEVICE).length > 0;\n    if (role === ROLE_TAG_DEVICE) {\n      devices[session].online = online;\n      for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {\n        safeSend(b, JSON.stringify({ type: \"relay\", event: \"device-attached\" }));\n      }\n      safeSend(\n        server,\n        JSON.stringify({ type: \"relay\", event: \"device-attached\", self: true })\n      );\n    } else {\n      safeSend(\n        server,\n        JSON.stringify({ type: \"relay\", event: \"joined\", deviceOnline: online })\n      );\n      for (const d of this.state.getWebSockets(ROLE_TAG_DEVICE)) {\n        safeSend(d, JSON.stringify({ type: \"relay\", event: \"browser-joined\" }));\n      }\n    }\n\n    return new Response(null, { status: 101, webSocket: client });\n  }\n\n  async webSocketMessage(ws, message) {\n    const role = roleOf(ws);\n    if (role === ROLE_TAG_DEVICE) {\n      for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {\n        safeSend(b, message);\n      }\n    } else {\n      const devices = Object.entries(devices).filter(([, info])=> info.online && info.unlocked).map(([, info]) => info.deviceId);\n      if (devices.length === 0) {\n        safeSend(\n          ws,\n          JSON.stringify({type: \"error\", message: \"no device connected for this session\"})\n        );\n        return;\n      }\n      // Forward to ALL unlocked devices\n      for (const d of devices) {\n        // Find the DO that owns this device session\n        for (const [devId, info] of Object.entries(devices)) {\n          if (info.deviceId === d && info.unlocked) {\n            // Send to the DO's browser connections\n            for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {\n              // Check if this browser is linked to this device\n              // Simple broadcast: forward to all unlocked browsers\n              safeSend(b, message);\n            }\n          }\n        }\n      }\n    }\n  }\n\n  async webSocketClose(ws) {\n    await this.onLeave(ws);\n  }\n\n  async webSocketError(ws) {\n    await this.onLeave(ws);\n  }\n\n  async onLeave(ws) {\n    const role = roleOf(ws);\n    const payload = JSON.stringify({\n      type: \"relay\",\n      event: role === ROLE_TAG_DEVICE ? \"device-detached\" : \"peer-left\"\n    });\n    for (const peer of this.state.getWebSockets()) {\n      if (peer !== ws) safeSend(peer, payload);\n    }\n    // Remove device if it was a device socket\n    if (role === ROLE_TAG_DEVICE) {\n      const sessionId = ws.deserializeAttachment ? ws.deserializeAttachment().session : null;\n      if (sessionId && devices[sessionId]) {\n        devices[sessionId].online = false;\n        // Notify browsers device went offline\n        const payload = JSON.stringify({\n          type: \"relay\",\n          event: \"device-detached\",\n          deviceId: sessionId\n        });\n        for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {\n          safeSend(b, payload);\n        }\n      }\n    }\n  }\n}\n\nexport default {\n  async fetch(request, env) {\n    const url = new URL(request.url);\n\n    if (url.pathname === \"/healthz\") {\n      return new Response(\"ok\\n\", { headers: { \"content-type\": \"text/plain\" } });\n    }\n\n    if (url.pathname === \"/ws\") {\n      // Optional shared secret: set with `wrangler secret put AUTH_TOKEN`;\n      // clients then pass ?token=... (browser) or X-Relay-Token (device).\n      if (env.AUTH_TOKEN) {\n        const provided =\n          url.searchParams.get(\"token\") || request.headers.get(\"X-Relay-Token\");\n        if (provided !== env.AUTH_TOKEN) {\n          return new Response(\"unauthorized\\n\", { status: 401 });\n        }\n      }\n\n      const sessionId =\n        url.searchParams.get(\"sessionId\") ||\n        request.headers.get(\"X-Session-Id\") ||\n        \"default\";\n\n      // One Durable Object instance per session id.\n      const id = env.SESSIONS.idFromName(sessionId);\n      return env.SESSIONS.get(id).fetch(request);\n    }\n\n    // Everything else: the control page (static assets).\n    return env.ASSETS.fetch(request);\n  },\n}\n
+/**
+ * WebSocket relay for the Remote Control Android app.
+ *
+ * Architecture:
+ *   - One SessionDO per session id (the device's Build.MODEL) holds the live
+ *     device socket and any browser sockets for that session.
+ *   - One RegistryDO (well-known name) tracks EVERY connected device across
+ *     all sessions: model, online, unlocked. The control page reads it via
+ *     /console?mode=list and unlocks devices with password 00100.
+ *   - Browser commands are routed cross-DO to the session DO that owns the
+ *     target device, so the console can control any device without knowing
+ *     its session up front.
+ *
+ * URL shapes:
+ *   /ws?sessionId=<id>                  browser (or device without header)
+ *   /ws?sessionId=<id>&role=device      device (app sends X-Session-Id too)
+ *   /console?mode=list                  all live devices (registry)
+ *   /console/unlock?deviceId=..&pw=00100  unlock a device (registry)
+ *   /console/forget?deviceId=..&pw=00100  forget a device (registry)
+ *   /healthz                            health check
+ */
+
+const ROLE_TAG_DEVICE = "device";
+const ROLE_TAG_BROWSER = "browser";
+const UNLOCK_PASSWORD = "00100";
+const REGISTRY_NAME = "__device_registry__";
+
+function safeSend(ws, data) {
+  try {
+    ws.send(data);
+  } catch (e) {
+    /* socket already closing */
+  }
+}
+
+function json(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function attachmentOf(ws) {
+  try {
+    return ws.deserializeAttachment() || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function roleOf(ws) {
+  if (ws.tags && ws.tags.includes(ROLE_TAG_DEVICE)) return ROLE_TAG_DEVICE;
+  if (ws.tags && ws.tags.includes(ROLE_TAG_BROWSER)) return ROLE_TAG_BROWSER;
+  return attachmentOf(ws).role || ROLE_TAG_BROWSER;
+}
+
+/* ------------------------------------------------------------------ *
+ * SessionDO — one instance per session id (= device model name).     *
+ * Holds the device socket + that session's browser sockets.          *
+ * ------------------------------------------------------------------ */
+export class SessionDO {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.unlocked = false;
+  }
+
+  async notifyRegistry(message) {
+    if (!this.env || !this.env.SESSIONS) return;
+    try {
+      const id = this.env.SESSIONS.idFromName(REGISTRY_NAME);
+      await this.env.SESSIONS.get(id).fetch("https://relay/registry", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(message),
+      });
+    } catch (e) {
+      /* registry unreachable — device still works within its session */
+    }
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    // Internal endpoint: console DO forwards a command for this session's device.
+    if (url.pathname === "/__forward") {
+      const message = await request.text();
+      const devices = this.state.getWebSockets(ROLE_TAG_DEVICE);
+      if (devices.length === 0) {
+        return json({ error: "no device connected for this session" }, 404);
+      }
+      if (!this.unlocked) {
+        return json({ error: "device is locked — unlock with password 00100" }, 403);
+      }
+      for (const d of devices) safeSend(d, message);
+      return json({ ok: true });
+    }
+
+    // Internal endpoint: registry tells us this device was unlocked.
+    if (url.pathname === "/__set_unlocked") {
+      this.unlocked = true;
+      return json({ ok: true });
+    }
+
+    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("Expected a WebSocket upgrade\n", { status: 426 });
+    }
+
+    const role =
+      url.searchParams.get("role") === "device" ||
+      request.headers.get("X-Role") === "device"
+        ? ROLE_TAG_DEVICE
+        : ROLE_TAG_BROWSER;
+    const session =
+      url.searchParams.get("sessionId") ||
+      request.headers.get("X-Session-Id") ||
+      "default";
+    const model = url.searchParams.get("model") || session;
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    if (role === ROLE_TAG_DEVICE) {
+      // A reconnecting device replaces the stale socket for this session.
+      for (const old of this.state.getWebSockets(ROLE_TAG_DEVICE)) {
+        try {
+          old.close(4000, "replaced by a new device connection");
+        } catch (e) {
+          /* ignore */
+        }
+      }
+    }
+
+    server.serializeAttachment({ role, session });
+    await this.state.acceptWebSocket(server, [role]);
+
+    const online = this.state.getWebSockets(ROLE_TAG_DEVICE).length > 0;
+
+    if (role === ROLE_TAG_DEVICE) {
+      // Register in the global device registry so the console can list it.
+      await this.notifyRegistry({ op: "attach", deviceId: session, model });
+      for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {
+        safeSend(
+          b,
+          JSON.stringify({ type: "relay", event: "device-attached", deviceId: session, model })
+        );
+      }
+      safeSend(
+        server,
+        JSON.stringify({ type: "relay", event: "device-attached", self: true })
+      );
+    } else {
+      safeSend(
+        server,
+        JSON.stringify({ type: "relay", event: "joined", deviceOnline: online })
+      );
+      for (const d of this.state.getWebSockets(ROLE_TAG_DEVICE)) {
+        safeSend(d, JSON.stringify({ type: "relay", event: "browser-joined" }));
+      }
+    }
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws, message) {
+    const att = attachmentOf(ws);
+
+    if (roleOf(ws) === ROLE_TAG_DEVICE) {
+      // Device -> browsers of this session.
+      for (const b of this.state.getWebSockets(ROLE_TAG_BROWSER)) {
+        safeSend(b, message);
+      }
+      return;
+    }
+
+    // Browser -> device. Commands carry { deviceId }; route to the right DO.
+    let parsed = null;
+    try {
+      parsed = JSON.parse(message);
+    } catch (e) {
+      /* non-JSON: forward within session */
+    }
+    const target = parsed && parsed.deviceId;
+
+    if (!target || target === att.session) {
+      const devices = this.state.getWebSockets(ROLE_TAG_DEVICE);
+      if (devices.length === 0) {
+        safeSend(
+          ws,
+          JSON.stringify({ type: "error", message: "no device connected for this session" })
+        );
+        return;
+      }
+      for (const d of devices) safeSend(d, message);
+      return;
+    }
+
+    // Cross-session: hand the command to the DO that owns the target device.
+    if (!this.env || !this.env.SESSIONS) {
+      safeSend(ws, JSON.stringify({ type: "error", message: "routing unavailable" }));
+      return;
+    }
+    try {
+      const id = this.env.SESSIONS.idFromName(target);
+      const resp = await this.env.SESSIONS.get(id).fetch("https://relay/__forward", {
+        method: "POST",
+        body: message,
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        safeSend(
+          ws,
+          JSON.stringify({ type: "error", message: err.error || "delivery failed", deviceId: target })
+        );
+      }
+    } catch (e) {
+      safeSend(ws, JSON.stringify({ type: "error", message: "delivery failed" }));
+    }
+  }
+
+  async webSocketClose(ws) {
+    await this.onLeave(ws);
+  }
+
+  async webSocketError(ws) {
+    await this.onLeave(ws);
+  }
+
+  async onLeave(ws) {
+    const att = attachmentOf(ws);
+    if (roleOf(ws) === ROLE_TAG_DEVICE) {
+      this.unlocked = false;
+      await this.notifyRegistry({ op: "detach", deviceId: att.session });
+      const payload = JSON.stringify({
+        type: "relay",
+        event: "device-detached",
+        deviceId: att.session,
+      });
+      for (const peer of this.state.getWebSockets(ROLE_TAG_BROWSER)) {
+        safeSend(peer, payload);
+      }
+    } else {
+      for (const peer of this.state.getWebSockets()) {
+        if (peer !== ws) {
+          safeSend(peer, JSON.stringify({ type: "relay", event: "peer-left" }));
+        }
+      }
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * RegistryDO — global list of every connected device + unlock state. *
+ * State survives hibernation via DO storage (SQLite-backed).         *
+ * ------------------------------------------------------------------ */
+export class RegistryDO {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+
+  async loadDevices() {
+    return (await this.state.storage.get("devices")) || {};
+  }
+
+  async saveDevices(devices) {
+    await this.state.storage.put("devices", devices);
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    // Session DOs report attach/detach here.
+    if (request.method === "POST" && url.pathname === "/registry") {
+      const msg = await request.json().catch(() => null);
+      if (!msg || !msg.op) return json({ error: "bad message" }, 400);
+      const devices = await this.loadDevices();
+      if (msg.op === "attach") {
+        devices[msg.deviceId] = {
+          model: msg.model || msg.deviceId,
+          online: true,
+          unlocked: devices[msg.deviceId]?.unlocked || false,
+          lastSeen: Date.now(),
+        };
+      } else if (msg.op === "detach") {
+        if (devices[msg.deviceId]) {
+          devices[msg.deviceId].online = false;
+          devices[msg.deviceId].unlocked = false;
+        }
+      }
+      await this.saveDevices(devices);
+      return json({ ok: true });
+    }
+
+    // Control page: list every known device.
+    if (url.pathname === "/list") {
+      const devices = await this.loadDevices();
+      return json({
+        devices: Object.entries(devices).map(([deviceId, d]) => ({
+          deviceId,
+          model: d.model,
+          online: !!d.online,
+          unlocked: !!d.unlocked,
+        })),
+      });
+    }
+
+    // Control page: unlock a device with password 00100.
+    if (url.pathname === "/unlock") {
+      const deviceId = url.searchParams.get("deviceId");
+      const pw = url.searchParams.get("pw");
+      if (pw !== UNLOCK_PASSWORD) return json({ error: "invalid password" }, 403);
+      const devices = await this.loadDevices();
+      if (!devices[deviceId]) return json({ error: "unknown device" }, 404);
+      devices[deviceId].unlocked = true;
+      await this.saveDevices(devices);
+      // Tell the device's session DO to accept commands.
+      try {
+        const id = this.env.SESSIONS.idFromName(deviceId);
+        await this.env.SESSIONS.get(id).fetch("https://relay/__set_unlocked", {
+          method: "POST",
+        });
+      } catch (e) {
+        /* session DO will also unlock when the next command checks registry */
+      }
+      return json({ success: true, deviceId });
+    }
+
+    // Control page: forget a device (offline leftovers).
+    if (url.pathname === "/forget") {
+      const deviceId = url.searchParams.get("deviceId");
+      const pw = url.searchParams.get("pw");
+      if (pw !== UNLOCK_PASSWORD) return json({ error: "invalid password" }, 403);
+      const devices = await this.loadDevices();
+      delete devices[deviceId];
+      await this.saveDevices(devices);
+      return json({ success: true, deviceId });
+    }
+
+    return json({ error: "unknown console endpoint" }, 400);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Router                                                             *
+ * ------------------------------------------------------------------ */
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/healthz") {
+      return new Response("ok\n", { headers: { "content-type": "text/plain" } });
+    }
+
+    // Console API -> registry DO.
+    if (url.pathname === "/console" || url.pathname.startsWith("/console/")) {
+      const target =
+        url.pathname === "/console/unlock"
+          ? "/unlock"
+          : url.pathname === "/console/forget"
+            ? "/forget"
+            : "/list";
+      const id = env.SESSIONS.idFromName(REGISTRY_NAME);
+      const rewritten = new Request("https://relay" + target + url.search, {
+        method: request.method,
+        headers: request.headers,
+      });
+      return env.SESSIONS.get(id).fetch(rewritten);
+    }
+
+    if (url.pathname === "/ws") {
+      // Optional shared secret: set with `wrangler secret put AUTH_TOKEN`;
+      // clients then pass ?token=... (browser) or X-Relay-Token (device).
+      if (env.AUTH_TOKEN) {
+        const provided =
+          url.searchParams.get("token") || request.headers.get("X-Relay-Token");
+        if (provided !== env.AUTH_TOKEN) {
+          return new Response("unauthorized\n", { status: 401 });
+        }
+      }
+
+      const sessionId =
+        url.searchParams.get("sessionId") ||
+        request.headers.get("X-Session-Id") ||
+        "default";
+
+      // One Durable Object instance per session id.
+      const id = env.SESSIONS.idFromName(sessionId);
+      return env.SESSIONS.get(id).fetch(request);
+    }
+
+    // Everything else: the control page (static assets).
+    return env.ASSETS.fetch(request);
+  },
+};

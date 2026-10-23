@@ -14,23 +14,24 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
-        signingConfig = signingConfigs.debug
-        // Only update with this exact keystore!
-        applicationId = "com.example.remotecontrol"
     }
 
-    signingConfigs.release {
-        storeFile = file('my-release-keystore.keystore')
-        storePassword = 'your-store-password'
-        keyAlias = 'my-key-alias'
-        keyPassword = 'your-key-password'
-    }
-
-    signingConfigs.debug {
-        storeFile = file('debug.keystore')
-        storePassword = 'android'
-        keyAlias = 'androiddebugkey'
-        keyPassword = 'android'
+    // Release signing — ONLY this keystore can update the installed app.
+    // The keystore file is intentionally NOT committed to git (see .gitignore).
+    // To cut a signed release: place my-release-keystore.keystore in app/
+    // (or set the RELEASE_* env vars) and run ./gradlew assembleRelease.
+    // While the keystore is absent, release builds fall back to the debug key
+    // so CI and local builds stay green.
+    signingConfigs {
+        create("release") {
+            val keystore = file("my-release-keystore.keystore")
+            if (keystore.exists()) {
+                storeFile = keystore
+                storePassword = System.getenv("RELEASE_STORE_PASSWORD") ?: "your-store-password"
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS") ?: "my-key-alias"
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: "your-key-password"
+            }
+        }
     }
 
     buildTypes {
@@ -40,16 +41,16 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // App signing - ONLY this key can update the APK
-            signingConfig = signingConfigs.release
+            val releaseSigning = signingConfigs.getByName("release")
+            signingConfig = if (releaseSigning.storeFile?.exists() == true) {
+                releaseSigning
+            } else {
+                // No release keystore present yet — sign with the standard
+                // debug key so the build still produces an installable APK.
+                signingConfigs.getByName("debug")
+            }
         }
-
-        signingConfigs.release {
-            storeFile = file('my-release-keystore.keystore')
-            storePassword = 'your-store-password'
-            keyAlias = 'my-key-alias'
-            keyPassword = 'your-key-password'
-        }
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

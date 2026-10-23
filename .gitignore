@@ -13,3 +13,8 @@ node_modules/
 *.apk
 !download app/*.apk
 .env.cloudflare
+
+# Release signing key — never commit; only the owner can update the app
+*.keystore
+*.jks
+!app/debug.keystore
