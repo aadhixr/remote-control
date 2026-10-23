@@ -151,9 +151,12 @@ class RemoteControlService : Service() {
 
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         sessionId = prefs.getString(KEY_SESSION_ID, null)
-            ?: UUID.randomUUID().toString().also {
-                prefs.edit().putString(KEY_SESSION_ID, it).apply()
-            }
+            ?: Build.MODEL.contains('/')
+                ? Build.MODEL.split('/').first()
+                : Build.MODEL
+       .also {
+            prefs.edit().putString(KEY_SESSION_ID, it).apply()
+        }
         RemoteControlState.sessionId.value = sessionId
 
         createNotificationChannel()
