@@ -1,10 +1,10 @@
 # Remote Control — downloads
 
-**App version: v1.0 (versionName `1.0`, versionCode `1`)**
+**App version: v1.2 (versionName `1.2`, versionCode `3`)**
 
 | File | Version | Built by |
 |---|---|---|
-| `remote-control-v1.0-debug.apk` | v1.0 (versionCode 1) | GitHub Actions — `Build debug APK` workflow |
+| `remote-control-v1.0-debug.apk` | v1.2 (versionCode 3) | GitHub Actions — `Build debug APK` workflow |
 
 The APK in this folder is produced automatically by
 `.github/workflows/build-apk.yml` whenever the app sources change, then

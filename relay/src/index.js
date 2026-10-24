@@ -221,10 +221,15 @@ export class SessionDO {
     if (!target || target === att.session) {
       const devices = this.state.getWebSockets(ROLE_TAG_DEVICE);
       if (devices.length === 0) {
-        safeSend(
-          ws,
-          JSON.stringify({ type: "error", message: "no device connected for this session" })
-        );
+        // Only reply with an error to real commands (they carry an action).
+        // Events, pongs and notices from a mis-tagged client must be dropped
+        // silently — answering them can create an infinite error ping-pong.
+        if (parsed && parsed.action) {
+          safeSend(
+            ws,
+            JSON.stringify({ type: "error", message: "no device connected for this session" })
+          );
+        }
         return;
       }
       for (const d of devices) safeSend(d, message);
