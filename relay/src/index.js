@@ -82,6 +82,25 @@ export class SessionDO {
     }
   }
 
+  // The unlock flag kept in this.instance is lost whenever the Durable
+  // Object restarts (hibernation), while the registry's copy survives in
+  // SQLite. Ask the registry so an unlocked device never silently becomes
+  // undriveable from the console.
+  async registryUnlocked() {
+    if (!this.env || !this.env.REGISTRY) return false;
+    try {
+      const id = this.env.REGISTRY.idFromName(REGISTRY_NAME);
+      const resp = await this.env.REGISTRY
+        .get(id)
+        .fetch("https://relay/state?deviceId=" + encodeURIComponent(this.state.id.name));
+      if (!resp.ok) return false;
+      const data = await resp.json();
+      return !!data.unlocked;
+    } catch (e) {
+      return false;
+    }
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
 
@@ -102,7 +121,14 @@ export class SessionDO {
         return json({ error: "no device connected for this session" }, 404);
       }
       if (!this.unlocked) {
-        return json({ error: "device is locked — unlock with password 00100" }, 403);
+        // Re-check the durable registry before refusing: this in-memory
+        // flag resets on every Durable Object restart (the registry does
+        // not), and the console badge comes from the registry anyway.
+        if (await this.registryUnlocked()) {
+          this.unlocked = true;
+        } else {
+          return json({ error: "device is locked — unlock with password 00100" }, 403);
+        }
       }
       for (const d of devices) safeSend(d, message);
       return json({ ok: true });
@@ -365,6 +391,15 @@ export class RegistryDO {
           info: d.info || null,
         })),
       });
+    }
+
+    // Internal: unlock state of a single device (durable — survives
+    // Durable Object restarts, unlike the session DO's in-memory flag).
+    if (url.pathname === "/state") {
+      const deviceId = url.searchParams.get("deviceId");
+      const devices = await this.loadDevices();
+      const d = deviceId ? devices[deviceId] : null;
+      return json({ deviceId: deviceId, exists: !!d, unlocked: !!(d && d.unlocked) });
     }
 
     // Control page: unlock a device with password 00100.
