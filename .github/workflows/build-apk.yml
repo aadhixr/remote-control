@@ -62,6 +62,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "APK already up to date."
           else
-            git commit -m "CI: Remote Control v1.0 (versionCode 1) debug APK -> download app/ [skip ci]"
+            git commit -m "CI: Remote Control debug APK -> download app/ [skip ci]"
             git push
           fi

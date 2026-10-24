@@ -80,12 +80,11 @@ class RemoteControlService : Service() {
 
     companion object {
         const val PREFS = "remote_control"
-        const val KEY_SERVER_URL = "server_url"
         const val KEY_ENABLED = "enabled"
         const val KEY_SESSION_ID = "session_id"
-        // Live relay (Cloudflare Worker). The app connects here on startup;
-        // the web console at the same origin lists every connected device.
-        // Session ID = Build.MODEL (device name). Override in the app UI.
+        // Embedded relay (Cloudflare Worker) — the app always connects to this
+        // URL; there is no server field in the UI. The web console at the same
+        // origin lists every connected device. Session ID = Build.MODEL.
         const val DEFAULT_URL = "wss://remote-control-relay.adhiphub-rc.workers.dev/ws"
         const val ACTION_ATTACH_PROJECTION = "com.example.remotecontrol.ATTACH_PROJECTION"
 
@@ -223,7 +222,7 @@ class RemoteControlService : Service() {
 
         isConnecting = true
         try {
-            val url = normalizeWsUrl(prefs.getString(KEY_SERVER_URL, DEFAULT_URL) ?: DEFAULT_URL)
+            val url = normalizeWsUrl(DEFAULT_URL)
             val request = Request.Builder().url(url).build()
             val generation = ++webSocketGeneration
             runCatching { webSocket?.cancel() }
@@ -707,7 +706,7 @@ class RemoteControlService : Service() {
         .put("sessionId", sessionId)
         .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
         .put("sdk", Build.VERSION.SDK_INT)
-        .put("app", "remote-control/1.0")
+        .put("app", "remote-control/1.1")
         .toString()
 
     private fun sendJson(builder: JSONObject.() -> Unit) {

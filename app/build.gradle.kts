@@ -16,48 +16,29 @@ android {
         versionName = "1.1"
     }
 
-    // Release signing — ONLY this keystore can update the installed app.
-    // The keystore file is intentionally NOT committed to git (see .gitignore).
-    // To cut a signed release: place my-release-keystore.keystore in app/
-    // (or set the RELEASE_* env vars) and run ./gradlew assembleRelease.
-    // While the keystore is absent, release builds fall back to the debug key
-    // so CI and local builds stay green.
+    // ONE signing key for every build (debug and release): the committed
+    // app/debug.keystore. Every APK is signed with this exact key, so each
+    // new build installs as an update over the previously installed one.
     signingConfigs {
-        // Committed debug keystore: every build (local + CI) signs with the
-        // SAME key, so updates always install over the previous APK.
-        create("debug") {
+        create("shared") {
             storeFile = file("debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
-
-        create("release") {
-            val keystore = file("my-release-keystore.keystore")
-            if (keystore.exists()) {
-                storeFile = keystore
-                storePassword = System.getenv("RELEASE_STORE_PASSWORD") ?: "your-store-password"
-                keyAlias = System.getenv("RELEASE_KEY_ALIAS") ?: "my-key-alias"
-                keyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: "your-key-password"
-            }
-        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("shared")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            val releaseSigning = signingConfigs.getByName("release")
-            signingConfig = if (releaseSigning.storeFile?.exists() == true) {
-                releaseSigning
-            } else {
-                // No release keystore present yet — sign with the standard
-                // debug key so the build still produces an installable APK.
-                signingConfigs.getByName("debug")
-            }
+            signingConfig = signingConfigs.getByName("shared")
         }
     }
 

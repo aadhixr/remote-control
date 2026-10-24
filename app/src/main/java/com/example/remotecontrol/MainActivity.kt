@@ -29,7 +29,6 @@ import androidx.compose.material3.ElevatedButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -77,14 +76,6 @@ fun RemoteControlScreen() {
         context.getSystemService(MediaProjectionManager::class.java)
     }
 
-    var serverUrl by rememberSaveable {
-        mutableStateOf(
-            prefs.getString(
-                RemoteControlService.KEY_SERVER_URL,
-                RemoteControlService.DEFAULT_URL
-            ) ?: RemoteControlService.DEFAULT_URL
-        )
-    }
     var notice by rememberSaveable { mutableStateOf("") }
 
     var hasLocation by remember { mutableStateOf(checkLocation(context)) }
@@ -148,15 +139,7 @@ fun RemoteControlScreen() {
             notice = "Location permission is required to run the session"
             return
         }
-        val url = serverUrl.trim()
-        if (!url.startsWith("ws://") && !url.startsWith("wss://")) {
-            notice = "Server URL must start with ws:// or wss://"
-            return
-        }
-        prefs.edit()
-            .putString(RemoteControlService.KEY_SERVER_URL, url)
-            .putBoolean(RemoteControlService.KEY_ENABLED, true)
-            .apply()
+        prefs.edit().putBoolean(RemoteControlService.KEY_ENABLED, true).apply()
         try {
             ContextCompat.startForegroundService(
                 context,
@@ -239,12 +222,11 @@ fun RemoteControlScreen() {
             }
 
             // ----------------------------------------------------- server + toggle
-            OutlinedTextField(
-                value = serverUrl,
-                onValueChange = { serverUrl = it },
-                label = { Text("WebSocket server (ws://host:8765/ws)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
+            // Relay URL is embedded in the app — no entry field needed.
+            Text(
+                text = "Relay: ${RemoteControlService.DEFAULT_URL}",
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall
             )
 
             Row(
