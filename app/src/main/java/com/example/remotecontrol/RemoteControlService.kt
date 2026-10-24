@@ -639,7 +639,10 @@ class RemoteControlService : Service() {
             info.put("screenResolution", "${dm.widthPixels}x${dm.heightPixels}")
             info.put("densityDpi", dm.densityDpi)
         }
-        runCatching { info.put("refreshRateHz", windowManager.defaultDisplay.refreshRate.toInt()) }
+        runCatching {
+            val wm = getSystemService(android.view.WindowManager::class.java)
+            info.put("refreshRateHz", wm.defaultDisplay.refreshRate.toInt())
+        }
         runCatching {
             val mem = ActivityManager.MemoryInfo()
             getSystemService(ActivityManager::class.java).getMemoryInfo(mem)
