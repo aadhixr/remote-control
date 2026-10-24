@@ -61,6 +61,7 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.net.URLEncoder
 import java.util.*
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -223,8 +224,17 @@ class RemoteControlService : Service() {
 
         isConnecting = true
         try {
-            val url = normalizeWsUrl(DEFAULT_URL)
-            val request = Request.Builder().url(url).build()
+            // Identify as a DEVICE at connect time: the relay only registers
+            // devices that arrive with role=device + a sessionId — otherwise
+            // the socket lands in the console browser room and the phone
+            // never appears in the device list.
+            val url = normalizeWsUrl(DEFAULT_URL) +
+                "?role=device&sessionId=" + URLEncoder.encode(sessionId, "UTF-8")
+            val request = Request.Builder()
+                .url(url)
+                .header("X-Role", "device")
+                .header("X-Session-Id", sessionId)
+                .build()
             val generation = ++webSocketGeneration
             runCatching { webSocket?.cancel() }
             webSocket = client.newWebSocket(request, socketListener(generation))
@@ -313,6 +323,10 @@ class RemoteControlService : Service() {
         }
         val action = json.optString("action")
         val id: Any? = if (json.isNull("id")) null else json.opt("id")
+        // Only react to real commands. Relay events, pongs and error notices
+        // carry no action — replying to them can create an infinite
+        // error ping-pong with the relay.
+        if (action.isEmpty()) return
         when (action) {
             "click" -> handleClick(json, id)
             "screenshot" -> handleScreenshot(id)
@@ -710,7 +724,7 @@ class RemoteControlService : Service() {
         .put("sessionId", sessionId)
         .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
         .put("sdk", Build.VERSION.SDK_INT)
-        .put("app", "remote-control/1.1")
+        .put("app", "remote-control/1.2")
         .toString()
 
     private fun sendJson(builder: JSONObject.() -> Unit) {
