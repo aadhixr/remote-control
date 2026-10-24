@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Platform theme only: Compose supplies all actual UI styling. -->
-    <style name="Theme.RemoteControl" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Platform theme only: Compose supplies all actual UI styling.
+         Dark parent so the launch window matches the always-dark app UI. -->
+    <style name="Theme.RemoteControl" parent="android:Theme.Material.NoActionBar" />
 </resources>
