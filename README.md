@@ -37,7 +37,7 @@ A working relay + control page is deployed on this account:
 
 ## App download
 
-**Remote Control v1.2 (versionCode 3)** — the debug APK lives in
+**Remote Control v1.3 (versionCode 4)** — the debug APK lives in
 [`download app/`](download%20app/) (`remote-control-v1.0-debug.apk`) and is
 rebuilt automatically by GitHub Actions (`.github/workflows/build-apk.yml`)
 whenever app sources change. See [`download app/README.md`](download%20app/README.md)
